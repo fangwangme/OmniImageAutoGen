@@ -48,7 +48,7 @@ npm run build
 
 3. Open Chrome and navigate to `chrome://extensions/`
 4. Enable **Developer mode** (toggle in top-right corner)
-5. Click **Load unpacked** and select the `.shared/extension-dist` folder
+5. Click **Load unpacked** and select the `.local/dist` folder
 6. Click the extension icon and select **Open Side Panel**
 
 ## ⚙️ Setup

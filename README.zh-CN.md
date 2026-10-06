@@ -48,7 +48,7 @@ npm run build
 
 3. 打开 Chrome 并进入 `chrome://extensions/`
 4. 开启 **开发者模式**（右上角开关）
-5. 点击 **加载已解压的扩展程序** 并选择 `.shared/extension-dist` 文件夹
+5. 点击 **加载已解压的扩展程序** 并选择 `.local/dist` 文件夹
 6. 点击插件图标并选择 **打开侧边栏**
 
 ## ⚙️ 配置

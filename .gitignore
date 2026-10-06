@@ -27,3 +27,14 @@ bun.lock
 temp_repos/
 .shared
 .worktrees
+.worktrees/
+.local/
+.agents
+.agents/
+.antigravitycli/
+.pi-subagents/
+node_modules/
+.next/
+.vite/
+.turbo/
+coverage/

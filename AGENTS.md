@@ -1,74 +1,49 @@
-# AI Agent Instructions - GeminiAutoGen
+# AI Agent Instructions - OmniImageAutoGen
 
 ## Identity
 You are an expert developer agent. Act precisely and maintain code quality.
 
-## Core Rules
-- **Workspace**: Main repo (`GeminiAutoGen/`) is the primary workspace. Dev worktree is at `.worktrees/GeminiAutoGen-dev/`.
-- **Git**: This is a **Standard Repo + Worktree** setup. Main repo is a working directory, not a bare repo.
-- **Tools**: Always use **absolute paths** for file tools.
-- **Dependencies**: Use `.shared/` resources (node_modules). Do not reinstall.
-
 ## Project Structure
 
-```
-GeminiAutoGen/                      # Main repo (active workspace)
-├── .git/                           # Standard git directory
-├── .shared/                        # Shared resources (not tracked by git)
+- Work in a non-`main` git worktree for normal development
+- Only modify `main` directly when the user explicitly authorizes template or repository-structure maintenance
+- Manual worktrees live under `.worktrees/`
+- Worktree-local state lives under `.local/`
+- Shared specs live under `docs/specs/`
+- Agent notes, plans, archives, and project status live under `.agents/`
+
+```text
+OmniImageAutoGen/
+├── .worktrees/                 # Manually created local worktrees (git-ignored)
+├── .local/                     # Worktree-local state (git-ignored)
 │   ├── data/
-│   ├── extension-dist/             # Build output (vite + copy-static)
-│   ├── node_modules/               # Shared dependencies
-│   ├── output/
-│   ├── releases/
-│   ├── package.json
-│   └── package-lock.json
-├── .worktrees/GeminiAutoGen-dev/     # Dev worktree
-│   ├── .git → ../.git/worktrees/GeminiAutoGen-dev  # Worktree git config
-│   ├── .shared → ../../.shared     # Symlink to shared resources
-│   ├── node_modules → ../../.shared/node_modules
-│   └── [project files mirror main]
-├── node_modules → .shared/node_modules  # Symlink in main repo
-└── [project files]
+│   ├── dist/                   # Build output (vite + copy-static)
+│   ├── release/                # Release bundles (.zip)
+│   └── requirements/
+├── .agents/                    # Agent state (git-ignored, symlinked in worktrees)
+│   ├── issues/
+│   ├── notes/
+│   └── plans/
+│       └── PROJECT_STATUS.md
+├── docs/
+│   └── specs/                  # Shared technical specifications
+│       └── README.md
+├── AGENTS.md
+├── package.json
+├── manifest.json
+└── src/
 ```
 
-## Key Details
+## Build & Release Paths
 
-### Symlinks
-- **Main repo**: `node_modules → .shared/node_modules`
-- **Dev worktree**: 
-  - `.shared → ../../.shared`
-  - `node_modules → ../../.shared/node_modules`
-- All symlinks are ignored by `.gitignore`
+- **Build Output**: `.local/dist` (`bun run build`)
+- **Release Bundles**: `.local/release/`
+- **Package Manager**: Use `bun` / `bunx` exclusively.
 
-### Build Paths
-- **vite.config.ts**: Output to `.shared/extension-dist`
-- **scripts/copy-static.mjs**: Copies to `.shared/extension-dist`
-- Both branches build to the same location
+## Development Workflow
 
-### Git Workflow
-- Main branch (`main`) is the primary development branch
-- Dev branch (`dev`) is for feature development
-- Use standard git commands in both main repo and worktree
-- Merge main into dev to sync changes
+1. Before starting feature work, read `AGENTS.md`, `.agents/plans/PROJECT_STATUS.md`, and the relevant `docs/specs/`.
+2. Work in a feature worktree under `.worktrees/` (linked `.agents -> ../../.agents`).
+3. Commit atomically and verify builds with `bun run build` and `bun run typecheck`.
+4. The `main` worktree is reserved exclusively for automated operations like git/build/package. Never manually edit, create, or delete source code files in `main/`.
 
-## Workflows
-1. **Modify**: Maintain project style and keep changes atomic.
-2. **Verify**: Run tests/builds within the active workspace after changes.
-3. **Safety**: NEVER hardcode or log API keys/secrets.
-
-## Release Checklist
-When releasing a new version:
-1. Always update version in BOTH files (must stay in sync):
-   - `manifest.json` (Chrome extension version)
-   - `package.json` (npm/version tracking)
-2. Commit version bump: `git add manifest.json package.json && git commit -m "chore: bump version to X.Y.Z"`
-3. Push to dev: `git push origin dev`
-4. Create PR to main and merge
-5. After merge on `main`, build and package:
-   - `npm run build`
-   - Zip the dist folder to `.shared/releases/` (use the build output in `.shared/extension-dist`)
-6. Create GitHub release from `main`:
-   - Print release title for quick verification:
-     - `echo "Release title: vX.Y.Z"`
-   - Use `gh release create vX.Y.Z ".shared/releases/GeminiAutoGen-vX.Y.Z.zip" --target main --title "vX.Y.Z" --generate-notes --fail-on-no-commits`
-   - This command creates the tag automatically and uploads the zip asset
