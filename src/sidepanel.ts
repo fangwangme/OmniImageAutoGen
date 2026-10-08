@@ -1,73 +1,172 @@
-import { createTranslator, normalizeLanguage } from "./i18n.js";
-import { createPanelStore } from "./sidepanel/state.js";
-import { createTaskLifecycle } from "./sidepanel/taskLifecycle.js";
-import { restoreInitialState, refreshSetup } from "./sidepanel/initState.js";
-import { loadTasksFile, openSettings } from "./sidepanel/uiBindings.js";
-import { formatDuration, remainingTime } from "./sidepanel/remainingTime.js";
-import { validateSessionUrl } from "./utils/platforms.js";
-import { computeReadiness } from "./utils/readiness.js";
-import { toSafeTaskFilename } from "./utils/taskQueue.js";
-import type { PanelMessage } from "./sidepanel/panelTypes.js";
+import { createTranslator, normalizeLanguage } from './i18n.js';
+import { createPanelStore, type LogEntry } from './sidepanel/state.js';
+import { createTaskLifecycle } from './sidepanel/taskLifecycle.js';
+import { restoreInitialState, refreshSetup } from './sidepanel/initState.js';
+import { loadTasksFile, openSettings } from './sidepanel/uiBindings.js';
+import { requestFolderPermission } from './sidepanel/folderStatus.js';
+import { renderSetupView } from './sidepanel/views/setupView.js';
+import { renderRunningView } from './sidepanel/views/runningView.js';
+import { renderFinishedView } from './sidepanel/views/finishedView.js';
+import { copyLogText } from './sidepanel/views/logCard.js';
+import { applyPreviewState } from './sidepanel/preview.js';
+import { toSafeTaskFilename } from './utils/taskQueue.js';
+import type { PlatformId, SessionMode, AspectRatio } from './types.js';
+import type { PanelMessage } from './sidepanel/panelTypes.js';
 
-document.addEventListener("DOMContentLoaded", async () => {
-  const store = createPanelStore();
-  const runtime = createTaskLifecycle(store);
-  const state = store.state;
-  const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T | null;
-  // This binding keeps the previous shell usable until the redesigned views replace it.
-  const render = () => {
-    const t = createTranslator(state.language), run = state.run;
-    const validation = validateSessionUrl(state.sessionUrls[state.platform], state.platform, t);
-    const readiness = computeReadiness({ platform: state.platform, sessionMode: state.sessionMode, sessionValidation: validation, tasksState: state.tasksState, folderStatus: state.folderStatus });
-    const start = element<HTMLButtonElement>("startBtn"), stop = element<HTMLButtonElement>("stopBtn"), input = element<HTMLInputElement>("jsonFile");
-    if (start) start.disabled = run.isRunning || state.starting || !readiness.ready || state.loadedTasks.every(task => state.existingFiles.has(toSafeTaskFilename(task.name).toLowerCase()));
-    if (stop) stop.disabled = !run.isRunning && !state.starting;
-    if (input) input.disabled = run.isRunning || state.starting;
-    const status = element("statusText");
-    if (status) status.textContent = state.setupMessage || (run.isRunning ? `${run.currentIndex + 1} / ${run.taskQueue.length}` : run.haltReason || (state.view === "finished" ? run.outcome : readiness.ready ? "Ready" : "Not ready"));
-    const info = element("fileInfo"); if (info) info.textContent = `${state.loadedTasksFileName || "No prompts loaded"} · ${state.loadedTasks.length} tasks`;
-    const log = element("logOutput"); if (log) log.textContent = state.logs.filter(entry => !entry.verbose).map(entry => `${entry.time} ${entry.message}`).join("\n");
-    const progress = element("progressText"); if (progress) progress.textContent = `${run.savedCount + run.skippedCount + run.failedCount} / ${run.taskQueue.length}`;
-    const elapsed = element("elapsedTime"); if (elapsed) elapsed.textContent = run.startTime ? formatDuration((run.endTime || Date.now()) - run.startTime) : "0s";
-    const remaining = element("remainingTime"); const remainingMs = remainingTime(run); if (remaining) remaining.textContent = remainingMs === null ? "—" : formatDuration(remainingMs);
-    const file = element("currentFileName"); if (file) file.textContent = run.taskQueue[run.currentIndex]?.name || "";
-  };
-  store.subscribe(render);
-  await restoreInitialState(store);
-  element("startBtn")?.addEventListener("click", () => { void runtime.start(); });
-  element("stopBtn")?.addEventListener("click", () => { void runtime.stop(); });
-  element("resetBtn")?.addEventListener("click", () => { void runtime.reset(); });
-  element("settingsBtn")?.addEventListener("click", () => { void openSettings(); });
-  const fileInput = element<HTMLInputElement>("jsonFile");
-  fileInput?.addEventListener("change", () => { if (fileInput.files?.[0]) void loadTasksFile(store, fileInput.files[0]); });
-  const sessionInput = element<HTMLInputElement>("conversationUrlInput");
-  if (sessionInput) {
-    sessionInput.value = state.sessionUrls[state.platform];
-    sessionInput.addEventListener("input", () => {
-      if (state.run.isRunning) return;
-      state.sessionUrls[state.platform] = sessionInput.value; state.sessionMode = "existing";
-      void chrome.storage.local.set({ [`sessionUrl_${state.platform}`]: sessionInput.value, ui_sessionMode: "existing" });
-      store.render();
-    });
+const store = createPanelStore(), state = store.state;
+const parameters = new URL(location.href).searchParams;
+const preview = parameters.has('preview') && !(globalThis.chrome && chrome.runtime && chrome.runtime.id);
+const runtime = preview ? null : createTaskLifecycle(store);
+const fileInput = document.getElementById('jsonFile') as HTMLInputElement;
+const views = { setup: document.getElementById('setupView')!, running: document.getElementById('runningView')!, finished: document.getElementById('finishedView')! };
+let sessionSaveTimer: ReturnType<typeof setTimeout> | undefined;
+let resetting = false;
+let lastLogEntry: LogEntry | undefined;
+
+function render() {
+  const active = document.activeElement;
+  const sessionFocused = active instanceof HTMLInputElement && active.id === 'sessionUrl';
+  const selection = sessionFocused ? [active.selectionStart, active.selectionEnd] : undefined;
+  const focusedAction = active instanceof HTMLElement ? active.dataset.action : undefined;
+  const focusedValue = active instanceof HTMLElement ? active.dataset.value : undefined;
+  const focusedView = active instanceof Element ? active.closest('.panel-view') : null;
+  const target = views[state.view], mainScroll = target.querySelector('main')?.scrollTop || 0;
+  const logScroll = target.querySelector('.log-output')?.scrollTop || 0;
+  for(const [name,element] of Object.entries(views)) element.hidden = name !== state.view;
+  target.innerHTML = state.view === 'setup' ? renderSetupView(state) : state.view === 'running' ? renderRunningView(state) : renderFinishedView(state);
+  document.documentElement.lang = state.language === 'zh' ? 'zh-CN' : 'en';
+  document.title = 'OmniImageAutoGen';
+  const main = target.querySelector('main'); if(main) main.scrollTop = mainScroll;
+  const log = target.querySelector('.log-output');
+  const latestLogEntry = state.logs.at(-1);
+  if(log) log.scrollTop = latestLogEntry && latestLogEntry !== lastLogEntry ? log.scrollHeight : logScroll;
+  lastLogEntry = latestLogEntry;
+  if(sessionFocused) {
+    const input = target.querySelector<HTMLInputElement>('#sessionUrl');
+    input?.focus({preventScroll:true});
+    // A text input with URL keyboard hints keeps its caret across validation renders.
+    if(input && selection?.[0] !== null) { try { input.setSelectionRange(selection![0],selection![1]); } catch {} }
+  } else if(focusedAction && focusedView === target) {
+    const replacement = Array.from(target.querySelectorAll<HTMLElement>('[data-action]')).find(element=>element.dataset.action===focusedAction&&element.dataset.value===focusedValue);
+    if(!(replacement instanceof HTMLButtonElement && replacement.disabled)) replacement?.focus({preventScroll:true});
   }
-  const onMessage = (message: PanelMessage) => runtime.handlePanelMessage(message);
-  chrome.runtime.onMessage.addListener(onMessage);
-  const refresh = () => { if (!state.run.isRunning && !state.starting) void refreshSetup(store); };
-  const onUpdated = (_tabId: number, change: chrome.tabs.TabChangeInfo) => { if (change.url) refresh(); };
-  chrome.tabs.onActivated.addListener(refresh); chrome.tabs.onUpdated.addListener(onUpdated);
-  const onStorage = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
-    if (area !== "local") return;
-    if (changes.uiLanguage) { state.language = normalizeLanguage(changes.uiLanguage.newValue); store.render(); }
-    if (changes.settings_downloadTimeout) { state.run.downloadTimeout = Number(changes.settings_downloadTimeout.newValue) || 120; store.render(); }
-    if ((changes.currentTaskRunSeq && changes.currentTaskRunSeq.newValue === undefined) || (changes.loadedTasks && changes.loadedTasks.newValue === undefined && state.run.isRunning)) void runtime.reset({ clearStorage: false });
-    if (changes.custom_warning_patterns) {
-      void chrome.tabs.query({ url: ["https://gemini.google.com/*", "https://chatgpt.com/*"] }).then(tabs => Promise.allSettled(tabs.filter(tab => tab.id !== undefined).map(tab => chrome.tabs.sendMessage(tab.id!, { action: "RELOAD_WARNING_PATTERNS" }))));
+}
+store.subscribe(render);
+const persist = async (items: Record<string, unknown>) => { if(!preview) await chrome.storage.local.set(items); };
+const refresh = async () => { if(!preview) await refreshSetup(store); else store.render(); };
+async function flushSession() {
+  if(sessionSaveTimer) clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = undefined;
+  await persist({ [`sessionUrl_${state.platform}`]:state.sessionUrls[state.platform],ui_platform:state.platform,ui_sessionMode:state.sessionMode });
+}
+async function copy(text: string, button: HTMLElement) {
+  if(!text) return;
+  await navigator.clipboard.writeText(text);
+  const original = button.innerHTML;
+  button.textContent = createTranslator(state.language)('ui.copied');
+  setTimeout(() => { if(button.isConnected) button.innerHTML = original; },800);
+}
+async function selectPlatform(platform: PlatformId) {
+  await flushSession();
+  state.platform = platform; state.setupMessage = undefined;
+  await persist({ui_platform:platform});
+  await refresh();
+}
+async function handleAction(button: HTMLElement) {
+  const action = button.dataset.action, value = button.dataset.value;
+  if((state.run.isRunning || state.starting) && ['platform','session-mode','choose-file','active-tab','switch-platform'].includes(action || '')) return;
+  switch(action) {
+    case 'settings': if(!preview) await openSettings(); break;
+    case 'choose-folder': if(!preview) await openSettings('#folders'); break;
+    case 'platform': await selectPlatform(value as PlatformId); break;
+    case 'session-mode':
+      await flushSession(); state.sessionMode = value as SessionMode; state.setupMessage = undefined;
+      await persist({ui_sessionMode:state.sessionMode}); store.render(); break;
+    case 'active-tab':
+      if(!preview) state.activeTabUrl = (await chrome.tabs.query({active:true,currentWindow:true}))[0]?.url || '';
+      state.sessionUrls[state.platform] = state.activeTabUrl;
+      await flushSession(); store.render(); break;
+    case 'switch-platform': {
+      const url = state.sessionUrls[state.platform];
+      await flushSession(); state.platform = value as PlatformId; state.sessionUrls[state.platform] = url;
+      state.sessionMode = 'existing'; await flushSession(); await refresh(); break;
     }
-    if (!state.run.isRunning && !state.starting && (changes.sourceSubfolder || changes.outputSubfolder || changes.settings_aspectRatio)) void restoreInitialState(store);
-  };
-  chrome.storage.onChanged.addListener(onStorage);
-  window.addEventListener("unload", () => {
-    chrome.runtime.onMessage.removeListener(onMessage); chrome.tabs.onActivated.removeListener(refresh); chrome.tabs.onUpdated.removeListener(onUpdated); chrome.storage.onChanged.removeListener(onStorage); runtime.dispose();
-  }, { once: true });
+    case 'choose-file': fileInput.value = ''; fileInput.click(); break;
+    case 'allow-folder':
+      if(!preview) await requestFolderPermission(value as 'source'|'output');
+      else state.folderStatus[value as 'source'|'output'].state = 'granted';
+      await refresh(); break;
+    case 'allow-halted':
+      if(!preview) {
+        // Permission requests stay directly in this user gesture.
+        const folders = (['source','output'] as const).filter(folder=>state.folderStatus[folder].state !== 'granted');
+        for(const folder of folders) await requestFolderPermission(folder);
+      }
+      else state.folderStatus.output.state = 'granted';
+      await refresh(); break;
+    case 'start':
+      await flushSession(); if(runtime) await runtime.start(); else {applyPreviewState(store,'running');store.render();} break;
+    case 'stop': if(runtime) await runtime.stop(); else {state.run.isRunning=false;state.run.outcome='stopped';state.run.endTime=Date.now();state.view='finished';store.render();} break;
+    case 'reset':
+      if(runtime) { resetting=true;try{await runtime.reset();}finally{resetting=false;} }
+      else {applyPreviewState(store,'setup');state.view='setup';store.render();} break;
+    case 'toggle-log': state.logCollapsed=!state.logCollapsed;await persist({logCollapsed:state.logCollapsed});store.render();break;
+    case 'log-all': state.logFilter='all';store.render();break;
+    case 'log-issues': state.logFilter='issues';store.render();break;
+    case 'clear-log': state.logs=[];store.render();break;
+    case 'copy-log': await copy(copyLogText(state),button);break;
+    case 'copy-session': await copy(state.run.sessionUrl,button);break;
+    case 'copy-filename': await copy(toSafeTaskFilename(state.run.taskQueue[state.run.currentIndex]?.name || '').replace(/\.[^.]+$/,''),button);break;
+    case 'open-chat': if(!preview) await chrome.tabs.create({url:state.run.sessionUrl || state.run.homeUrl,active:true});break;
+    case 'back-setup': state.view='setup';await refresh();break;
+    case 'rerun':
+      if(!state.run.sessionUrl) {state.view='setup';await refresh();break;}
+      state.sessionMode='existing';state.sessionUrls[state.platform]=state.run.sessionUrl;await flushSession();
+      if(runtime) await runtime.start();else{applyPreviewState(store,'running');store.render();}break;
+  }
+}
+document.addEventListener('click',event=>{
+  const button=(event.target as Element).closest<HTMLElement>('[data-action]');
+  if(!button || button instanceof HTMLButtonElement && button.disabled) return;
+  void handleAction(button).catch(error=>{store.addLog('error',error instanceof Error?error.message:String(error));});
+});
+document.addEventListener('input',event=>{
+  const input=event.target;
+  if(!(input instanceof HTMLInputElement)||input.id!=='sessionUrl'||state.run.isRunning||state.starting) return;
+  state.sessionUrls[state.platform]=input.value;state.setupMessage=undefined;
+  if(sessionSaveTimer) clearTimeout(sessionSaveTimer);
+  sessionSaveTimer=setTimeout(()=>{void flushSession().catch(error=>store.addLog('error',String(error)));},300);
   store.render();
 });
+fileInput.addEventListener('change',()=>{if(fileInput.files?.[0]&&!preview) void loadTasksFile(store,fileInput.files[0]).then(refresh).catch(error=>store.addLog('error',String(error)));});
+
+async function init() {
+  if(preview) {applyPreviewState(store,parameters.get('preview') || 'setup');state.language=normalizeLanguage(parameters.get('lang') || undefined);store.render();return;}
+  await restoreInitialState(store);
+  const onMessage=(message:PanelMessage)=>runtime!.handlePanelMessage(message);
+  chrome.runtime.onMessage.addListener(onMessage);
+  const activeChanged=()=>{if(!state.run.isRunning&&!state.starting) void refresh();};
+  const onUpdated=(_tabId:number,change:chrome.tabs.TabChangeInfo)=>{if(change.url) activeChanged();};
+  chrome.tabs.onActivated.addListener(activeChanged);chrome.tabs.onUpdated.addListener(onUpdated);
+  const onStorage=(changes:Record<string,chrome.storage.StorageChange>,area:string)=>{
+    if(area!=='local') return;
+    const removed=(key:string)=>changes[key]?.oldValue!==undefined && changes[key]?.newValue===undefined;
+    const externalClear=removed('currentTaskRunSeq') || ((state.run.isRunning||state.starting)&&removed('loadedTasks')) || (removed('loadedTasks') && ['ui_platform','uiLanguage','settings_aspectRatio'].some(removed));
+    if(externalClear&&!resetting) {resetting=true;void runtime!.reset({clearStorage:false}).finally(()=>{resetting=false;});return;}
+    if(changes.uiLanguage) state.language=normalizeLanguage(changes.uiLanguage.newValue);
+    if(changes.settings_aspectRatio) state.aspectRatio=(['1:1','3:4','4:3','9:16','16:9'].includes(changes.settings_aspectRatio.newValue)?changes.settings_aspectRatio.newValue:'16:9') as AspectRatio;
+    if(changes.settings_downloadTimeout) state.run.downloadTimeout=Number(changes.settings_downloadTimeout.newValue)||120;
+    if(changes.logCollapsed) state.logCollapsed=Boolean(changes.logCollapsed.newValue);
+    for(const platform of ['chatgpt','gemini'] as const) if(changes[`sessionUrl_${platform}`]) state.sessionUrls[platform]=changes[`sessionUrl_${platform}`].newValue || '';
+    if(changes.custom_warning_patterns) void chrome.tabs.query({url:['https://gemini.google.com/*','https://chatgpt.com/*']}).then(tabs=>Promise.allSettled(tabs.filter(tab=>tab.id!==undefined).map(tab=>chrome.tabs.sendMessage(tab.id!,{action:'RELOAD_WARNING_PATTERNS'}))));
+    if(!state.run.isRunning&&!state.starting&&(changes.sourceSubfolder||changes.outputSubfolder)) void refresh();
+    store.render();
+  };
+  chrome.storage.onChanged.addListener(onStorage);
+  window.addEventListener('unload',()=>{
+    if(sessionSaveTimer) clearTimeout(sessionSaveTimer);
+    chrome.runtime.onMessage.removeListener(onMessage);chrome.tabs.onActivated.removeListener(activeChanged);chrome.tabs.onUpdated.removeListener(onUpdated);chrome.storage.onChanged.removeListener(onStorage);runtime!.dispose();
+  },{once:true});
+  store.render();
+}
+void init().catch(error=>{store.addLog('error',String(error));});
