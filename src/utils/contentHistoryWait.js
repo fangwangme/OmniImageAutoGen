@@ -3,14 +3,11 @@ export const evaluateContentHistoryImageWait = ({
   lastImageLoaded,
   hasTextOnlyWarning = false
 }) => {
-  if (hasTextOnlyWarning) {
-    return { shouldWait: false, reason: "last-response-text-warning" };
+  if (hasAnyImage) {
+    return lastImageLoaded
+      ? { shouldWait: false, reason: "last-image-loaded" }
+      : { shouldWait: true, reason: "waiting-last-image-loaded" };
   }
-  if (!hasAnyImage) {
-    return { shouldWait: true, reason: "waiting-last-image-appear" };
-  }
-  if (!lastImageLoaded) {
-    return { shouldWait: true, reason: "waiting-last-image-loaded" };
-  }
-  return { shouldWait: false, reason: "last-image-loaded" };
+  if (hasTextOnlyWarning) return { shouldWait: false, reason: "last-response-text-warning" };
+  return { shouldWait: true, reason: "waiting-last-image-appear" };
 };
