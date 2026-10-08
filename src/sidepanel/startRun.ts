@@ -1,178 +1,84 @@
-import type { TaskItem } from "../types.js";
-import { urlsMatch, validateLockedConversationUrl } from "../utils/lockedConversation.js";
-import { buildPendingTaskQueue } from "../utils/taskQueue.js";
-import type { ListFilesResponse } from "./panelTypes.js";
-import type { TaskLifecycleState } from "./taskLifecycle.js";
+import { createTranslator } from "../i18n.js";
+import { buildHomeUrl, sessionUrlsMatch, validateSessionUrl } from "../utils/platforms.js";
+import { computeReadiness } from "../utils/readiness.js";
+import { toSafeTaskFilename } from "../utils/taskQueue.js";
+import type { ListFilesResponse, TaskErrorType } from "./panelTypes.js";
+import type { PanelStore, RunState } from "./state.js";
+import { refreshSetup } from "./initState.js";
+import { ensureLockedConversationTab, waitForPageLoad } from "./tabHelpers.js";
 
-type Translator = (key: string, vars?: Record<string, string | number>) => string;
-
-export async function startRun(params: {
-  loadedTasks: TaskItem[];
-  runState: TaskLifecycleState;
-  t: Translator;
-  statusText: HTMLDivElement;
-  clearLogOutput: () => void;
-  appendLogLine: (line: string) => void;
-  updateUI: (running: boolean) => void;
-  startTimer: () => void;
-  storageGet: <T>(keys: string[]) => Promise<T>;
-  runtimeSendMessage: <T>(message: unknown) => Promise<T>;
-  tabsQuery: (queryInfo: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>;
-  tabsUpdate: (
-    tabId: number,
-    props: chrome.tabs.UpdateProperties
-  ) => Promise<chrome.tabs.Tab>;
-  tabsCreate: (props: chrome.tabs.CreateProperties) => Promise<chrome.tabs.Tab>;
-  waitForPageLoad: (tabId: number, timeoutMs: number) => Promise<void>;
-  ensureLockedConversationTab: (
-    tabId: number,
-    pageLoadTimeout: number,
-    normalizedStepDelay: number | undefined,
-    reason: string
-  ) => Promise<boolean>;
-}) {
-  const {
-    loadedTasks,
-    runState,
-    t,
-    statusText,
-    clearLogOutput,
-    appendLogLine,
-    updateUI,
-    startTimer,
-    storageGet,
-    runtimeSendMessage,
-    tabsQuery,
-    tabsUpdate,
-    tabsCreate,
-    waitForPageLoad,
-    ensureLockedConversationTab
-  } = params;
-
-  const storedUrl = await storageGet<{ lockedConversationUrl?: string }>([
-    "lockedConversationUrl"
-  ]);
-  const lockedCandidate = storedUrl.lockedConversationUrl?.trim() || "";
-  if (!lockedCandidate) {
-    statusText.textContent = t("sidepanel.status.lockUrlFirst");
-    statusText.style.color = "var(--danger)";
-    return false;
+export const secondsSetting = (value: unknown, fallback: number) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+export const stepDelaySeconds = (value: unknown) => {
+  const seconds = secondsSetting(value, 1);
+  return seconds > 60 ? seconds / 1000 : seconds;
+};
+export const taskError = (message: string, errorType: TaskErrorType) => Object.assign(new Error(message), { errorType });
+export async function openSession(store: PanelStore, run: RunState, current: () => boolean, reuse: boolean) {
+  const check = () => { if (!current()) throw new Error("Cancelled"); };
+  const settings = await chrome.storage.local.get(["settings_pageLoadTimeout", "settings_stepDelay"]);
+  check();
+  const startedAt = Date.now();
+  run.stages["open-session"] = { status: "active", startedAt };
+  store.render();
+  const targetUrl = run.sessionPending ? run.homeUrl : run.sessionUrl;
+  let existing: chrome.tabs.Tab | undefined;
+  if (reuse && !run.sessionPending) {
+    const tabs = await chrome.tabs.query({ currentWindow: true });
+    check();
+    existing = tabs.find(tab => typeof tab.id === "number" && !!tab.url && sessionUrlsMatch(targetUrl, tab.url));
   }
-  const lockedValidation = validateLockedConversationUrl(lockedCandidate, t);
-  if (!lockedValidation.ok) {
-    statusText.textContent = t("sidepanel.status.lockedUrlInvalid", {
-      reason: lockedValidation.message
-    });
-    statusText.style.color = "var(--danger)";
-    return false;
+  const tab = existing?.id !== undefined ? await chrome.tabs.update(existing.id, { active: true }) : await chrome.tabs.create({ url: targetUrl, active: true });
+  check();
+  if (tab.id === undefined) throw taskError("Could not create platform tab", "locked-url");
+  run.currentTabId = tab.id;
+  await waitForPageLoad(tab.id, secondsSetting(settings.settings_pageLoadTimeout, 30) * 1000, chrome.tabs.get.bind(chrome.tabs), current);
+  check();
+  await new Promise(resolve => setTimeout(resolve, stepDelaySeconds(settings.settings_stepDelay) * 2000));
+  check();
+  if (!run.sessionPending) {
+    const matched = await ensureLockedConversationTab(tab.id, run.sessionUrl);
+    check();
+    if (!matched) throw taskError(createTranslator(store.state.language)("lifecycle.sessionMismatch"), "locked-url");
   }
-  runState.lockedConversationUrl = lockedCandidate;
-
-  if (loadedTasks.length === 0) {
-    statusText.textContent = t("sidepanel.status.uploadJson");
-    statusText.style.color = "var(--danger)";
-    return false;
+  const endedAt = Date.now();
+  run.stages["open-session"] = { status: "done", startedAt, endedAt, meta: `${Math.round((endedAt - startedAt) / 1000)}s` };
+  store.render();
+}
+export async function startRun(store: PanelStore, run: RunState, current: () => boolean): Promise<boolean> {
+  const stored = await chrome.storage.local.get(["ui_platform", "ui_sessionMode", "sessionUrl_chatgpt", "sessionUrl_gemini", "settings_maxRetries", "settings_maxConsecutiveFailures", "settings_downloadTimeout", "currentTaskRunSeq"]);
+  if (!current()) return false;
+  const state = store.state;
+  state.platform = stored.ui_platform === "chatgpt" ? "chatgpt" : stored.ui_platform === "gemini" ? "gemini" : state.platform;
+  state.sessionMode = stored.ui_sessionMode === "existing" ? "existing" : stored.ui_sessionMode === "new" ? "new" : state.sessionMode;
+  for (const platform of ["chatgpt", "gemini"] as const) if (typeof stored[`sessionUrl_${platform}`] === "string") state.sessionUrls[platform] = stored[`sessionUrl_${platform}`];
+  await refreshSetup(store);
+  if (!current()) return false;
+  const validation = validateSessionUrl(state.sessionUrls[state.platform], state.platform, createTranslator(state.language));
+  const readiness = computeReadiness({ platform: state.platform, sessionMode: state.sessionMode, sessionValidation: validation, tasksState: state.tasksState, folderStatus: state.folderStatus });
+  if (!readiness.ready) { state.setupMessage = createTranslator(state.language)("lifecycle.notReady"); store.render(); return false; }
+  run.platform = state.platform; run.sessionMode = state.sessionMode;
+  run.sessionPending = state.sessionMode === "new"; run.sessionUrl = run.sessionPending ? "" : state.sessionUrls[state.platform].trim();
+  run.homeUrl = buildHomeUrl(state.platform, state.activeTabUrl);
+  run.maxRetries = Math.max(0, typeof stored.settings_maxRetries === "number" ? stored.settings_maxRetries : 3);
+  run.maxConsecutiveFailures = Math.max(0, typeof stored.settings_maxConsecutiveFailures === "number" ? stored.settings_maxConsecutiveFailures : 5);
+  run.downloadTimeout = secondsSetting(stored.settings_downloadTimeout, 120);
+  run.activeTaskRunSeq = Math.max(Date.now(), typeof stored.currentTaskRunSeq === "number" ? stored.currentTaskRunSeq + 1 : 0);
+  run.startTime = Date.now();
+  await openSession(store, run, current, true);
+  if (!current()) return false;
+  const listing = await chrome.runtime.sendMessage({ action: "LIST_ALL_FILES", platform: run.platform }) as ListFilesResponse;
+  if (!current()) return false;
+  if (listing?.error) throw taskError(listing.error, listing.errorType || "folder");
+  state.existingFiles = new Set((listing?.files || []).map(name => name.toLowerCase()));
+  run.taskQueue = state.loadedTasks.filter(task => !state.existingFiles.has(toSafeTaskFilename(task.name).toLowerCase()));
+  if (!run.taskQueue.length) {
+    state.setupMessage = createTranslator(state.language)("lifecycle.allSaved", { total: state.loadedTasks.length });
+    store.render(); return false;
   }
-
-  runState.conversationUrl = runState.lockedConversationUrl;
-  console.log(`[Panel] Using locked conversation URL: ${runState.conversationUrl}`);
-
-  const stepSettings = await storageGet<{
-    settings_stepDelay?: number;
-    settings_pageLoadTimeout?: number;
-  }>(["settings_stepDelay", "settings_pageLoadTimeout"]);
-  const pageLoadTimeoutMs = (stepSettings.settings_pageLoadTimeout || 30) * 1000;
-  const rawStepDelay = stepSettings.settings_stepDelay;
-  const normalizedStepDelay =
-    rawStepDelay && rawStepDelay > 60 ? rawStepDelay / 1000 : rawStepDelay;
-  const tabReadyDelayMs = (normalizedStepDelay || 1) * 2 * 1000;
-
-  const existingTab = (await tabsQuery({ currentWindow: true })).find(
-    (tab) =>
-      typeof tab.id === "number" &&
-      typeof tab.url === "string" &&
-      urlsMatch(runState.conversationUrl, tab.url)
-  );
-
-  if (existingTab && typeof existingTab.id === "number") {
-    runState.currentTabId = existingTab.id;
-    await tabsUpdate(runState.currentTabId, { active: true });
-    if (existingTab.status === "loading") {
-      await waitForPageLoad(runState.currentTabId, pageLoadTimeoutMs);
-      await new Promise((r) => setTimeout(r, tabReadyDelayMs));
-    }
-  } else {
-    const newTab = await tabsCreate({ url: runState.conversationUrl });
-    runState.currentTabId = newTab.id ?? null;
-    if (runState.currentTabId) {
-      await waitForPageLoad(runState.currentTabId, pageLoadTimeoutMs);
-      await new Promise((r) => setTimeout(r, tabReadyDelayMs));
-    }
-  }
-
-  if (!runState.currentTabId) {
-    statusText.textContent = t("sidepanel.status.failedToOpenTab");
-    statusText.style.color = "var(--danger)";
-    return false;
-  }
-
-  const lockOk = await ensureLockedConversationTab(
-    runState.currentTabId,
-    pageLoadTimeoutMs,
-    normalizedStepDelay,
-    "start"
-  );
-  if (!lockOk) return false;
-
-  statusText.textContent = t("sidepanel.status.checkingExisting");
-  let existingFiles = new Set<string>();
-  try {
-    const response = await runtimeSendMessage<ListFilesResponse>({
-      action: "LIST_ALL_FILES"
-    });
-    existingFiles = new Set(response.files || []);
-  } catch (err) {
-    console.warn(
-      "Could not list existing files (background might be restarting):",
-      err
-    );
-  }
-
-  runState.taskQueue = buildPendingTaskQueue(loadedTasks, existingFiles);
-  const skipped = loadedTasks.length - runState.taskQueue.length;
-  if (skipped > 0) {
-    statusText.textContent = t("sidepanel.status.skippedExisting", {
-      count: skipped
-    });
-  }
-
-  if (runState.taskQueue.length === 0) {
-    statusText.textContent = t("sidepanel.status.allTasksCompleted");
-    statusText.style.color = "var(--success)";
-    return false;
-  }
-
-  runState.currentIndex = 0;
-  runState.retryCounts.clear();
-  runState.skippedCount = 0;
-  runState.failedCount = 0;
-  runState.consecutiveFailureCount = 0;
-  runState.nextTaskMode = "full";
-  runState.isRunning = true;
-
-  clearLogOutput();
-  appendLogLine(t("sidepanel.log.starting"));
-  if (skipped > 0) {
-    appendLogLine(t("sidepanel.status.skippedExisting", { count: skipped }));
-  }
-  appendLogLine(
-    t("sidepanel.status.taskProgress", {
-      current: 1,
-      total: runState.taskQueue.length
-    })
-  );
-
-  updateUI(true);
-  startTimer();
+  run.isRunning = true;
+  state.logs = [];
+  state.view = "running";
+  state.setupMessage = undefined;
+  store.render();
   return true;
 }

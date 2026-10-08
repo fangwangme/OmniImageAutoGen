@@ -1,145 +1,33 @@
-import type { TaskItem } from "../types.js";
+import { validateTasks } from "../utils/taskValidation.js";
+import type { PanelStore } from "./state.js";
 
-type Translator = (key: string, vars?: Record<string, string | number>) => string;
-
-export function bindSettingsButton(
-  settingsBtn: HTMLButtonElement | null,
-  runtimeSendMessage: <T>(message: unknown) => Promise<T>
-) {
-  if (!settingsBtn) {
-    console.warn("[Panel] Settings button not found");
+const loadSequences = new WeakMap<PanelStore, number>();
+export async function loadTasksFile(store: PanelStore, file: File) {
+  if (store.state.run.isRunning || store.state.starting) return;
+  const sequence = (loadSequences.get(store) || 0) + 1;
+  loadSequences.set(store, sequence);
+  const current = () => loadSequences.get(store) === sequence && !store.state.run.isRunning && !store.state.starting;
+  const text = await file.text();
+  if (!current()) return;
+  let raw: unknown;
+  try { raw = JSON.parse(text); }
+  catch {
+    store.state.loadedTasksRaw = []; store.state.loadedTasks = []; store.state.loadedTasksFileName = file.name;
+    store.state.tasksState = { hasFile: true, tasks: [], issues: [], total: 0, fatal: "invalid-json" };
+    await chrome.storage.local.remove(["loadedTasksRaw", "loadedTasks", "loadedTasksFileName"]);
+    if (current()) store.render();
     return;
   }
-  settingsBtn.addEventListener("click", async () => {
-    try {
-      await chrome.runtime.openOptionsPage();
-    } catch {
-      await runtimeSendMessage<void>({ action: "OPEN_OPTIONS" });
-    }
-  });
+  const validation = validateTasks(raw);
+  store.state.loadedTasksRaw = Array.isArray(raw) ? raw : [];
+  store.state.loadedTasksFileName = file.name;
+  if ("fatal" in validation) { store.state.loadedTasks = []; store.state.tasksState = { hasFile: true, tasks: [], issues: [], total: 0, fatal: validation.fatal }; }
+  else { store.state.loadedTasks = validation.tasks; store.state.tasksState = { hasFile: true, ...validation }; }
+  await chrome.storage.local.set({ loadedTasksRaw: raw, loadedTasks: store.state.loadedTasks, loadedTasksFileName: file.name });
+  if (current()) store.render();
 }
-
-export function bindCurrentFileCopy(params: {
-  currentFileNameEl: HTMLDivElement | null;
-  copiedLabel: () => string;
-}) {
-  const { currentFileNameEl, copiedLabel } = params;
-  if (!currentFileNameEl) return;
-  currentFileNameEl.addEventListener("click", async () => {
-    const text = currentFileNameEl.textContent || "";
-    const filename = text.replace(/^[^\w]*/, "").trim();
-    const nameWithoutExt = filename.replace(/\.[^.]+$/, "");
-    if (!nameWithoutExt) return;
-    try {
-      await navigator.clipboard.writeText(nameWithoutExt);
-      const original = currentFileNameEl.textContent;
-      currentFileNameEl.textContent = copiedLabel();
-      setTimeout(() => {
-        currentFileNameEl.textContent = original;
-      }, 800);
-    } catch (err) {
-      console.error("[Panel] Failed to copy:", err);
-    }
-  });
-}
-
-export function bindLogControls(params: {
-  logCopyBtn: HTMLButtonElement | null;
-  logClearBtn: HTMLButtonElement | null;
-  logToggleBtn: HTMLButtonElement | null;
-  logOutput: HTMLDivElement | null;
-  clearLogOutput: () => void;
-  applyLogCollapsed: (collapsed: boolean) => void;
-  getLogCollapsed: () => boolean;
-  setLogCollapsed: (collapsed: boolean) => void;
-  storageSet: (items: Record<string, unknown>) => Promise<void>;
-  logCollapsedStorageKey: string;
-  copiedLabel: () => string;
-}) {
-  const {
-    logCopyBtn,
-    logClearBtn,
-    logToggleBtn,
-    logOutput,
-    clearLogOutput,
-    applyLogCollapsed,
-    getLogCollapsed,
-    setLogCollapsed,
-    storageSet,
-    logCollapsedStorageKey,
-    copiedLabel
-  } = params;
-
-  if (logCopyBtn) {
-    logCopyBtn.addEventListener("click", async () => {
-      if (!logOutput) return;
-      const text = logOutput.textContent || "";
-      if (!text.trim()) return;
-      try {
-        await navigator.clipboard.writeText(text);
-        const originalText = logCopyBtn.textContent;
-        logCopyBtn.textContent = copiedLabel();
-        setTimeout(() => {
-          logCopyBtn.textContent = originalText;
-        }, 800);
-      } catch (err) {
-        console.error("[Panel] Failed to copy logs:", err);
-      }
-    });
-  }
-
-  if (logClearBtn) {
-    logClearBtn.addEventListener("click", () => {
-      clearLogOutput();
-    });
-  }
-
-  if (logToggleBtn) {
-    logToggleBtn.addEventListener("click", async () => {
-      const nextCollapsed = !getLogCollapsed();
-      setLogCollapsed(nextCollapsed);
-      applyLogCollapsed(nextCollapsed);
-      await storageSet({ [logCollapsedStorageKey]: nextCollapsed });
-    });
-  }
-}
-
-export function bindJsonFileUpload(params: {
-  jsonFileInput: HTMLInputElement;
-  setLoadedTasks: (tasks: TaskItem[]) => void;
-  setFileInfo: (text: string, isError?: boolean) => void;
-  t: Translator;
-  storageSet: (items: Record<string, unknown>) => Promise<void>;
-}) {
-  const { jsonFileInput, setLoadedTasks, setFileInfo, t, storageSet } = params;
-
-  jsonFileInput.addEventListener("change", (event: Event) => {
-    const target = event.target as HTMLInputElement | null;
-    const file = target?.files?.[0];
-    if (!file) {
-      setLoadedTasks([]);
-      setFileInfo(t("sidepanel.file.noFile"));
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (e: ProgressEvent<FileReader>) => {
-      try {
-        const result = e.target?.result;
-        const rawText = typeof result === "string" ? result : "";
-        const json = JSON.parse(rawText) as unknown;
-        if (!Array.isArray(json)) {
-          throw new Error("File must contain an array");
-        }
-        const tasks = json as TaskItem[];
-        setLoadedTasks(tasks);
-        setFileInfo(t("sidepanel.status.loadedTasks", { count: tasks.length }));
-        void storageSet({ loadedTasks: tasks });
-      } catch {
-        setLoadedTasks([]);
-        setFileInfo(t("sidepanel.status.errorInvalidJson"), true);
-      }
-    };
-    reader.readAsText(file);
-  });
+export async function openSettings(hash = "") {
+  if (hash) { await chrome.tabs.create({ url: chrome.runtime.getURL(`options.html${hash}`) }); return; }
+  try { await chrome.runtime.openOptionsPage(); }
+  catch { await chrome.runtime.sendMessage({ action: "OPEN_OPTIONS" }); }
 }

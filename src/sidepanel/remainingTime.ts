@@ -1,40 +1,12 @@
-type Translator = (key: string, vars?: Record<string, string | number>) => string;
-
-export const updateRemainingTimeLabel = (params: {
-  t: Translator;
-  startTime: number;
-  completedTasks: number;
-  totalTasks: number;
-  formatTime: (seconds: number) => string;
-  setLabel: (label: string) => void;
-}) => {
-  const { t, startTime, completedTasks, totalTasks, formatTime, setLabel } = params;
-  const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
-
-  if (completedTasks > 0 && totalTasks > completedTasks) {
-    const avgSecondsPerTask = elapsedSeconds / completedTasks;
-    const remainingTasks = totalTasks - completedTasks;
-    const remainingSeconds = Math.floor(avgSecondsPerTask * remainingTasks);
-    const avgSeconds = Math.round(avgSecondsPerTask);
-    setLabel(
-      t("time.remainingWithAvg", {
-        remaining: formatTime(remainingSeconds),
-        avg: avgSeconds
-      })
-    );
-    return;
-  }
-
-  if (totalTasks === completedTasks && totalTasks > 0) {
-    const avgSeconds = Math.round(elapsedSeconds / totalTasks);
-    setLabel(
-      t("time.remainingWithAvg", {
-        remaining: formatTime(0),
-        avg: avgSeconds
-      })
-    );
-    return;
-  }
-
-  setLabel(t("time.unknown"));
-};
+import type { RunState } from "./state.js";
+export function formatDuration(ms: number) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds >= 3600) return `${Math.floor(seconds / 3600)}h ${String(Math.floor(seconds % 3600 / 60)).padStart(2, "0")}m`;
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+  return `${seconds}s`;
+}
+export function remainingTime(run: RunState, now = Date.now()): number | null {
+  const done = run.savedCount + run.skippedCount + run.failedCount;
+  if (!done || !run.startTime) return null;
+  return Math.max(0, ((run.endTime || now) - run.startTime) / done * (run.taskQueue.length - done));
+}
