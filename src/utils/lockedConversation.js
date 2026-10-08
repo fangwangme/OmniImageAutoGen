@@ -1,44 +1,18 @@
-export const normalizeUrlForCompare = (url) => {
-  try {
-    const parsed = new URL(url);
-    const normalizedPath = parsed.pathname.replace(/\/$/, "");
-    return `${parsed.origin}${normalizedPath}`;
-  } catch {
-    return url.replace(/\/$/, "");
-  }
-};
+import { detectPlatform, normalizeSessionUrl, sessionUrlsMatch, validateSessionUrl } from "./platforms.js";
 
-export const urlsMatch = (lockedUrl, currentUrl) =>
-  normalizeUrlForCompare(lockedUrl) === normalizeUrlForCompare(currentUrl);
-
-export const isGeminiHost = (hostname) =>
-  hostname === "gemini.google.com" || hostname.endsWith(".gemini.google.com");
+export const normalizeUrlForCompare = normalizeSessionUrl;
+export const urlsMatch = sessionUrlsMatch;
+export const isGeminiHost = (hostname) => detectPlatform(`https://${hostname}/`) === "gemini";
 
 export const validateLockedConversationUrl = (url, t) => {
-  try {
-    const parsed = new URL(url);
-    if (!isGeminiHost(parsed.hostname)) {
-      return {
-        ok: false,
-        message: t("validation.lockedUrl.mustGemini")
-      };
-    }
-    const normalizedPath = parsed.pathname.replace(/\/$/, "");
-    const pathWithoutAccount = normalizedPath.replace(/^\/u\/\d+/, "");
-    if (pathWithoutAccount === "/app") {
-      return {
-        ok: false,
-        message: t("validation.lockedUrl.mustSpecificConversation")
-      };
-    }
-    if (!pathWithoutAccount.includes("/app/")) {
-      return {
-        ok: false,
-        message: t("validation.lockedUrl.mustConversation")
-      };
-    }
-    return { ok: true };
-  } catch {
-    return { ok: false, message: t("validation.lockedUrl.invalid") };
-  }
+  const result = validateSessionUrl(url, "gemini", (key) => key);
+  if (result.ok) return { ok: true };
+  const key = {
+    empty: "validation.lockedUrl.invalid",
+    invalid: "validation.lockedUrl.invalid",
+    "wrong-platform": "validation.lockedUrl.mustGemini",
+    home: "validation.lockedUrl.mustSpecificConversation",
+    "not-conversation": "validation.lockedUrl.mustConversation"
+  }[result.code];
+  return { ok: false, message: t(key) };
 };
