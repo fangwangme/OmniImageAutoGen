@@ -74,12 +74,6 @@ declare global {
   }
 }
 
-const existingListenerState = window.__omniAutoGenWarningPatternListenerState;
-if (existingListenerState) {
-  chrome.storage.onChanged.removeListener(existingListenerState.storageListener);
-  chrome.runtime.onMessage.removeListener(existingListenerState.runtimeListener);
-}
-
 const storageListener: WarningPatternListenerState["storageListener"] = (
   changes,
   area
@@ -96,14 +90,17 @@ const runtimeListener: WarningPatternListenerState["runtimeListener"] = (
   void loadCustomWarningPatterns();
 };
 
-void loadCustomWarningPatterns();
-
-chrome.storage.onChanged.addListener(storageListener);
-chrome.runtime.onMessage.addListener(runtimeListener);
-window.__omniAutoGenWarningPatternListenerState = {
-  storageListener,
-  runtimeListener
-};
+export async function initializeWarningPatterns(): Promise<void> {
+  const existingListenerState = window.__omniAutoGenWarningPatternListenerState;
+  if (existingListenerState) {
+    chrome.storage.onChanged.removeListener(existingListenerState.storageListener);
+    chrome.runtime.onMessage.removeListener(existingListenerState.runtimeListener);
+  }
+  chrome.storage.onChanged.addListener(storageListener);
+  chrome.runtime.onMessage.addListener(runtimeListener);
+  window.__omniAutoGenWarningPatternListenerState = { storageListener, runtimeListener };
+  await loadCustomWarningPatterns();
+}
 
 export function matchesWarningPattern(text: string): boolean {
   const normalized = text.toLowerCase();
