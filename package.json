@@ -1,6 +1,6 @@
 {
   "name": "omni-image-autogen",
-  "version": "5.0.2",
+  "version": "6.0.0",
   "private": true,
   "type": "module",
   "scripts": {
