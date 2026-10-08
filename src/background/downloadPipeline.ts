@@ -17,6 +17,8 @@ type SaveResult = { success: boolean; filename?: string; error?: string; errorTy
 let activeArm: ActiveArm | null = null;
 let armGeneration = 0;
 let lastFileHash: string | null = null;
+// A cancelled attempt must finish aborting and removing its partial output before a new arm can reuse the name.
+let pendingSave: Promise<void> | null = null;
 
 const classify = (error: unknown): SaveResult => {
   const message = error instanceof Error ? error.message : String(error);
@@ -48,6 +50,8 @@ export async function armDownload(request: DownloadRequest, t: Translator) {
     if (!await scopeMatches(request)) return { ok: false, error: "Cancelled", errorType: "download" };
     cancelDownload();
     const generation = armGeneration;
+    if (pendingSave) await pendingSave;
+    if (generation !== armGeneration || !await scopeMatches(request)) return { ok: false, error: "Cancelled", errorType: "download" };
     const [source, output] = await Promise.all([getSourceHandle(), getOutputHandle()]);
     if (!source || !output) return { ok: false, error: t("errors.missingDirectoryHandles"), errorType: "folder" };
     const baseline = new Set<string>();
@@ -107,6 +111,12 @@ export async function waitAndSave(armId: string, t: Translator): Promise<SaveRes
   const arm = activeArm;
   if (!arm || arm.id !== armId || arm.waiting) return { success: false, error: "Download not armed", errorType: "download" };
   arm.waiting = true;
+  let finishCleanup: () => void = () => undefined;
+  const cleanupComplete = new Promise<void>(resolve => { finishCleanup = resolve; });
+  pendingSave = cleanupComplete;
+  let outputDir: FileSystemDirectoryHandle | null = null;
+  let createdTarget = false;
+  let verifiedTarget = false;
   try {
     const settings = await chrome.storage.local.get(["settings_downloadTimeout", "settings_pollInterval", "settings_downloadPollInterval", "settings_downloadStabilityInterval"]);
     const timeout = positive(settings.settings_downloadTimeout, 120) * 1000;
@@ -150,7 +160,15 @@ export async function waitAndSave(armId: string, t: Translator): Promise<SaveRes
         if (Date.now() >= deadline) break;
         const dir = await arm.output.getDirectoryHandle(platformSubdir(arm.platform), { create: true });
         assertActive(arm);
+        outputDir = dir;
+        let targetExisted = true;
+        try { await dir.getFileHandle(arm.targetFilename); } catch (error) {
+          if (error instanceof DOMException && error.name === "NotFoundError") targetExisted = false;
+          else throw error;
+        }
+        assertBeforeDeadline();
         const target = await dir.getFileHandle(arm.targetFilename, { create: true });
+        createdTarget = !targetExisted;
         assertActive(arm);
         arm.writer = await target.createWritable();
         assertActive(arm);
@@ -164,8 +182,10 @@ export async function waitAndSave(armId: string, t: Translator): Promise<SaveRes
         let verified: ImageBitmap;
         try { verified = await createImageBitmap(savedFile); } catch { throw new Error("Output verification failed"); }
         verified.close();
+        verifiedTarget = true;
         assertBeforeDeadline();
         await arm.source.removeEntry(candidate.name);
+        assertActive(arm);
         lastFileHash = hash;
         sendStage(arm, "done", targetExtLabel(arm.targetFilename));
         return { success: true, filename: arm.targetFilename };
@@ -175,7 +195,15 @@ export async function waitAndSave(armId: string, t: Translator): Promise<SaveRes
   } catch (error) {
     return !isActive(arm) ? cancelled() : classify(error);
   } finally {
-    if (arm.writer) await arm.writer.abort().catch(() => undefined);
-    if (activeArm === arm) activeArm = null;
+    try {
+      if (arm.writer) await arm.writer.abort().catch(() => undefined);
+      if (createdTarget && !verifiedTarget && outputDir) {
+        await outputDir.removeEntry(arm.targetFilename).catch(error => console.warn("[Background] Could not remove unverified output", error));
+      }
+    } finally {
+      if (activeArm === arm) activeArm = null;
+      if (pendingSave === cleanupComplete) pendingSave = null;
+      finishCleanup();
+    }
   }
 }
