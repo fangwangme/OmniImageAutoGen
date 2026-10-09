@@ -1,484 +1,178 @@
-import type { TaskItem } from "./types.js";
-import {
-  applyI18n,
-  createTranslator,
-  DEFAULT_LANGUAGE,
-  getStoredLanguage,
-  Language,
-  LANGUAGE_STORAGE_KEY,
-  normalizeLanguage
-} from "./i18n.js";
-import {
-  validateLockedConversationUrl
-} from "./utils/lockedConversation.js";
-import { attachConsoleTimestamps } from "./sidepanel/consoleTimestamp.js";
-import {
-  executeScript,
-  runtimeSendMessage,
-  storageClear,
-  storageGet,
-  storageRemove,
-  storageSet,
-  tabsCreate,
-  tabsGet,
-  tabsQuery,
-  tabsRemove,
-  tabsUpdate
-} from "./sidepanel/chromeApi.js";
-import {
-  ensureLockedConversationTab as ensureLockedConversationTabHelper,
-  waitForPageLoad as waitForPageLoadHelper
-} from "./sidepanel/tabHelpers.js";
-import { createLogView } from "./sidepanel/logView.js";
-import {
-  PanelMessage,
-  TaskRunMode
-} from "./sidepanel/panelTypes.js";
-import { restoreInitialState } from "./sidepanel/initState.js";
-import { updateRemainingTimeLabel } from "./sidepanel/remainingTime.js";
-import { bindResetControl, bindStopControl } from "./sidepanel/runControls.js";
-import {
-  createTaskLifecycle,
-  TaskLifecycleState
-} from "./sidepanel/taskLifecycle.js";
-import { startRun } from "./sidepanel/startRun.js";
-import { bindUrlLockControls } from "./sidepanel/urlLock.js";
-import {
-  bindCurrentFileCopy,
-  bindJsonFileUpload,
-  bindLogControls,
-  bindSettingsButton
-} from "./sidepanel/uiBindings.js";
-import { CUSTOM_WARNING_PATTERNS_STORAGE_KEY } from "./utils/warningPatterns.js";
-attachConsoleTimestamps();
+import { createTranslator, normalizeLanguage } from './i18n.js';
+import { createPanelStore, type LogEntry } from './sidepanel/state.js';
+import { createTaskLifecycle } from './sidepanel/taskLifecycle.js';
+import { restoreInitialState, refreshSetup } from './sidepanel/initState.js';
+import { loadTasksFile, openSettings } from './sidepanel/uiBindings.js';
+import { requestFolderPermission } from './sidepanel/folderStatus.js';
+import { renderSetupView } from './sidepanel/views/setupView.js';
+import { renderRunningView } from './sidepanel/views/runningView.js';
+import { renderFinishedView } from './sidepanel/views/finishedView.js';
+import { copyLogText } from './sidepanel/views/logCard.js';
+import { applyPreviewState } from './sidepanel/preview.js';
+import { toSafeTaskFilename } from './utils/taskQueue.js';
+import type { PlatformId, SessionMode, AspectRatio } from './types.js';
+import type { PanelMessage } from './sidepanel/panelTypes.js';
 
-const LOG_COLLAPSED_STORAGE_KEY = "logCollapsed";
+const store = createPanelStore(), state = store.state;
+const parameters = new URL(location.href).searchParams;
+const preview = parameters.has('preview') && !(globalThis.chrome && chrome.runtime && chrome.runtime.id);
+const runtime = preview ? null : createTaskLifecycle(store);
+const fileInput = document.getElementById('jsonFile') as HTMLInputElement;
+const views = { setup: document.getElementById('setupView')!, running: document.getElementById('runningView')!, finished: document.getElementById('finishedView')! };
+let sessionSaveTimer: ReturnType<typeof setTimeout> | undefined;
+let resetting = false;
+let lastLogEntry: LogEntry | undefined;
 
-let currentLanguage: Language = DEFAULT_LANGUAGE;
-let t = createTranslator(currentLanguage);
-let logPanel: HTMLDivElement | null = null;
-let logToggleBtn: HTMLButtonElement | null = null;
-let logOutputEl: HTMLDivElement | null = null;
-let logCollapsed = false;
+function cancelSessionSave() {
+  if(sessionSaveTimer) clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = undefined;
+}
 
-const updateLogToggleLabel = () => {
-  const label = logCollapsed
-    ? t("sidepanel.log.toggle.show")
-    : t("sidepanel.log.toggle.hide");
-  const button = logToggleBtn as HTMLButtonElement | null;
-  if (button) {
-    button.textContent = label;
+function render() {
+  const active = document.activeElement;
+  const sessionFocused = active instanceof HTMLInputElement && active.id === 'sessionUrl';
+  const selection = sessionFocused ? [active.selectionStart, active.selectionEnd] : undefined;
+  const focusedAction = active instanceof HTMLElement ? active.dataset.action : undefined;
+  const focusedValue = active instanceof HTMLElement ? active.dataset.value : undefined;
+  const focusedView = active instanceof Element ? active.closest('.panel-view') : null;
+  const target = views[state.view], mainScroll = target.querySelector('main')?.scrollTop || 0;
+  const logScroll = target.querySelector('.log-output')?.scrollTop || 0;
+  for(const [name,element] of Object.entries(views)) element.hidden = name !== state.view;
+  target.innerHTML = state.view === 'setup' ? renderSetupView(state) : state.view === 'running' ? renderRunningView(state) : renderFinishedView(state);
+  document.documentElement.lang = state.language === 'zh' ? 'zh-CN' : 'en';
+  document.title = 'OmniImageAutoGen';
+  const main = target.querySelector('main'); if(main) main.scrollTop = mainScroll;
+  const log = target.querySelector('.log-output');
+  const latestLogEntry = state.logs.at(-1);
+  if(log) log.scrollTop = latestLogEntry && latestLogEntry !== lastLogEntry ? log.scrollHeight : logScroll;
+  lastLogEntry = latestLogEntry;
+  if(sessionFocused) {
+    const input = target.querySelector<HTMLInputElement>('#sessionUrl');
+    input?.focus({preventScroll:true});
+    // A text input with URL keyboard hints keeps its caret across validation renders.
+    if(input && selection?.[0] !== null) { try { input.setSelectionRange(selection![0],selection![1]); } catch {} }
+  } else if(focusedAction && focusedView === target) {
+    const replacement = Array.from(target.querySelectorAll<HTMLElement>('[data-action]')).find(element=>element.dataset.action===focusedAction&&element.dataset.value===focusedValue);
+    if(!(replacement instanceof HTMLButtonElement && replacement.disabled)) replacement?.focus({preventScroll:true});
   }
-};
-
-const applyLogCollapsed = (collapsed: boolean) => {
-  logCollapsed = collapsed;
-  if (logPanel) {
-    logPanel.classList.toggle("is-collapsed", logCollapsed);
-  }
-  const output = logOutputEl as HTMLDivElement | null;
-  if (output) {
-    output.style.display = "";
-  }
-  updateLogToggleLabel();
-};
-
-const applyLanguage = (language: Language) => {
-  currentLanguage = language;
-  t = createTranslator(currentLanguage);
-  applyI18n(document, t);
-  document.title = t("sidepanel.documentTitle");
-  document.documentElement.lang = currentLanguage === "zh" ? "zh-CN" : "en";
-  updateLogToggleLabel();
-};
-
-document.addEventListener("DOMContentLoaded", async () => {
-  // UI Elements
-  const jsonFileInput = document.getElementById("jsonFile") as HTMLInputElement;
-  const fileInfo = document.getElementById("fileInfo") as HTMLDivElement;
-  const startBtn = document.getElementById("startBtn") as HTMLButtonElement;
-  const stopBtn = document.getElementById("stopBtn") as HTMLButtonElement;
-  const statusText = document.getElementById("statusText") as HTMLDivElement;
-  const progressBar = document.getElementById("progressBar") as HTMLDivElement;
-  const progressText = document.getElementById("progressText") as HTMLSpanElement;
-  const elapsedTimeElement = document.getElementById(
-    "elapsedTime"
-  ) as HTMLSpanElement;
-  const remainingTimeElement = document.getElementById(
-    "remainingTime"
-  ) as HTMLSpanElement;
-  const settingsBtn = document.getElementById("settingsBtn") as
-    | HTMLButtonElement
-    | null;
-  const conversationUrlInput = document.getElementById(
-    "conversationUrlInput"
-  ) as HTMLInputElement;
-  const lockUrlBtn = document.getElementById("lockUrlBtn") as
-    | HTMLButtonElement
-    | null;
-  const clearUrlBtn = document.getElementById("clearUrlBtn") as
-    | HTMLButtonElement
-    | null;
-  const urlStatus = document.getElementById("urlStatus") as HTMLDivElement;
-  const currentFileNameEl = document.getElementById(
-    "currentFileName"
-  ) as HTMLDivElement;
-  const resetBtn = document.getElementById("resetBtn") as HTMLButtonElement;
-  const logOutput = document.getElementById("logOutput") as HTMLDivElement;
-  const logCopyBtn = document.getElementById("logCopyBtn") as HTMLButtonElement;
-  const logClearBtn = document.getElementById("logClearBtn") as HTMLButtonElement;
-  logPanel = document.querySelector(".log-panel") as HTMLDivElement;
-  logToggleBtn = document.getElementById("logToggleBtn") as HTMLButtonElement;
-  logOutputEl = logOutput;
-
-  const initLanguage = async () => {
-    const storedLanguage = await getStoredLanguage();
-    applyLanguage(storedLanguage);
-  };
-
-  await initLanguage();
-
-  statusText.textContent = t("sidepanel.status.ready");
-  fileInfo.textContent = t("sidepanel.file.noFile");
-  urlStatus.textContent = t("sidepanel.lockedUrl.none");
-
-  const logState = await storageGet<{ logCollapsed?: boolean }>([
-    LOG_COLLAPSED_STORAGE_KEY
-  ]);
-  logCollapsed =
-    typeof logState.logCollapsed === "boolean" ? logState.logCollapsed : true;
-  applyLogCollapsed(logCollapsed);
-
-  // State
-  let loadedTasks: TaskItem[] = [];
-  let timerInterval: number | undefined;
-  const runState: TaskLifecycleState = {
-    taskQueue: [],
-    currentIndex: 0,
-    isRunning: false,
-    conversationUrl: "",
-    lockedConversationUrl: "",
-    startTime: 0,
-    currentTabId: null,
-    retryCounts: new Map<number, number>(),
-    lastLogTaskIndex: null,
-    skippedCount: 0,
-    failedCount: 0,
-    consecutiveFailureCount: 0,
-    nextTaskMode: "full" as TaskRunMode,
-    shouldClearLogBeforeNextTask: false
-  };
-
-  const waitForPageLoad = (tabId: number, timeoutMs: number) =>
-    waitForPageLoadHelper(tabId, timeoutMs, tabsGet);
-
-  const ensureLockedConversationTab = (
-    tabId: number,
-    pageLoadTimeout: number,
-    normalizedStepDelay: number | undefined,
-    reason: string
-  ) =>
-    ensureLockedConversationTabHelper({
-      tabId,
-      pageLoadTimeout,
-      normalizedStepDelay,
-      reason,
-      lockedConversationUrl: runState.lockedConversationUrl,
-      t,
-      tabsGet,
-      tabsCreate,
-      tabsRemove,
-      setCurrentTabId: (id) => {
-        runState.currentTabId = id;
-      },
-      getCurrentTabId: () => runState.currentTabId,
-      setIsRunning: (running) => {
-        runState.isRunning = running;
-      },
-      updateUI,
-      setStatus: (text, color) => {
-        statusText.textContent = text;
-        statusText.style.color = color;
-      },
-      waitForPageLoad
-    });
-
-  const refreshDynamicLabels = () => {
-    if (loadedTasks.length > 0) {
-      fileInfo.textContent = t("sidepanel.status.loadedTasks", {
-        count: loadedTasks.length
-      });
-      fileInfo.style.color = "var(--success)";
-    } else {
-      fileInfo.textContent = t("sidepanel.file.noFile");
-      fileInfo.style.color = "var(--muted)";
+}
+store.subscribe(render);
+const persist = async (items: Record<string, unknown>) => { if(!preview) await chrome.storage.local.set(items); };
+const refresh = async () => { if(!preview) await refreshSetup(store); else store.render(); };
+async function flushSession() {
+  cancelSessionSave();
+  await persist({ [`sessionUrl_${state.platform}`]:state.sessionUrls[state.platform],ui_platform:state.platform,ui_sessionMode:state.sessionMode });
+}
+async function copy(text: string, button: HTMLElement) {
+  if(!text) return;
+  await navigator.clipboard.writeText(text);
+  const original = button.innerHTML;
+  button.textContent = createTranslator(state.language)('ui.copied');
+  setTimeout(() => { if(button.isConnected) button.innerHTML = original; },800);
+}
+async function selectPlatform(platform: PlatformId) {
+  await flushSession();
+  state.platform = platform; state.setupMessage = undefined;
+  await persist({ui_platform:platform});
+  await refresh();
+}
+async function handleAction(button: HTMLElement) {
+  const action = button.dataset.action, value = button.dataset.value;
+  if((state.run.isRunning || state.starting) && ['platform','session-mode','choose-file','active-tab','switch-platform'].includes(action || '')) return;
+  switch(action) {
+    case 'settings': if(!preview) await openSettings(); break;
+    case 'choose-folder': if(!preview) await openSettings('#folders'); break;
+    case 'platform': await selectPlatform(value as PlatformId); break;
+    case 'session-mode':
+      await flushSession(); state.sessionMode = value as SessionMode; state.setupMessage = undefined;
+      await persist({ui_sessionMode:state.sessionMode}); store.render(); break;
+    case 'active-tab':
+      if(!preview) state.activeTabUrl = (await chrome.tabs.query({active:true,currentWindow:true}))[0]?.url || '';
+      state.sessionUrls[state.platform] = state.activeTabUrl;
+      await flushSession(); store.render(); break;
+    case 'switch-platform': {
+      const url = state.sessionUrls[state.platform];
+      await flushSession(); state.platform = value as PlatformId; state.sessionUrls[state.platform] = url;
+      state.sessionMode = 'existing'; await flushSession(); await refresh(); break;
     }
-
-    if (!runState.lockedConversationUrl) {
-      urlStatus.textContent = t("sidepanel.lockedUrl.none");
-      urlStatus.style.color = "var(--muted)";
-      return;
-    }
-
-    const validation = validateLockedConversationUrl(runState.lockedConversationUrl, t);
-    if (validation.ok) {
-      urlStatus.textContent = t("sidepanel.status.urlLocked");
-      urlStatus.style.color = "var(--success)";
-    } else {
-      urlStatus.textContent = t("sidepanel.status.validationError", {
-        reason: validation.message
-      });
-      urlStatus.style.color = "var(--danger)";
-    }
-  };
-
-  const formatDuration = (ms: number) => {
-    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return t("time.short", { minutes, seconds });
-  };
-
-  const { clearLogOutput, formatLogData, appendLogLine } = createLogView(logOutput);
-
-  bindSettingsButton(settingsBtn, runtimeSendMessage);
-  bindCurrentFileCopy({
-    currentFileNameEl,
-    copiedLabel: () => t("sidepanel.currentFile.copied")
-  });
-  bindLogControls({
-    logCopyBtn,
-    logClearBtn,
-    logToggleBtn,
-    logOutput,
-    clearLogOutput,
-    applyLogCollapsed,
-    getLogCollapsed: () => logCollapsed,
-    setLogCollapsed: (collapsed) => {
-      logCollapsed = collapsed;
-    },
-    storageSet,
-    logCollapsedStorageKey: LOG_COLLAPSED_STORAGE_KEY,
-    copiedLabel: () => t("sidepanel.currentFile.copied")
-  });
-
-  await restoreInitialState({
-    runState,
-    t,
-    conversationUrlInput,
-    urlStatus,
-    fileInfo,
-    setLoadedTasks: (tasks) => {
-      loadedTasks = tasks;
-    },
-    storageGet
-  });
-
-  bindUrlLockControls({
-    lockUrlBtn,
-    clearUrlBtn,
-    conversationUrlInput,
-    urlStatus,
-    runState,
-    t,
-    storageSet,
-    storageRemove
-  });
-
-  bindJsonFileUpload({
-    jsonFileInput,
-    setLoadedTasks: (tasks) => {
-      loadedTasks = tasks;
-    },
-    setFileInfo: (text, isError = false) => {
-      fileInfo.textContent = text;
-      fileInfo.style.color = isError ? "var(--danger)" : "var(--success)";
-      if (text === t("sidepanel.file.noFile")) {
-        fileInfo.style.color = "var(--muted)";
+    case 'choose-file': fileInput.value = ''; fileInput.click(); break;
+    case 'allow-folder':
+      if(!preview) await requestFolderPermission(value as 'source'|'output');
+      else state.folderStatus[value as 'source'|'output'].state = 'granted';
+      await refresh(); break;
+    case 'allow-halted':
+      if(!preview) {
+        // Permission requests stay directly in this user gesture.
+        const folders = (['source','output'] as const).filter(folder=>state.folderStatus[folder].state !== 'granted');
+        for(const folder of folders) await requestFolderPermission(folder);
       }
-    },
-    t: (key, vars) => t(key, vars),
-    storageSet
-  });
-
-  const taskLifecycle = createTaskLifecycle({
-    state: runState,
-    t,
-    statusText,
-    progressBar,
-    progressText,
-    currentFileNameEl,
-    appendLogLine,
-    formatLogData,
-    clearLogOutput,
-    formatDuration,
-    updateUI,
-    stopTimer,
-    updateRemainingTime,
-    waitForPageLoad,
-    ensureLockedConversationTab,
-    storageGet,
-    storageSet,
-    runtimeSendMessage,
-    executeScript,
-    tabsCreate,
-    tabsGet,
-    tabsQuery,
-    tabsRemove
-  });
-
-  // START Button
-  startBtn.addEventListener("click", async () => {
-    const started = await startRun({
-      loadedTasks,
-      runState,
-      t,
-      statusText,
-      clearLogOutput,
-      appendLogLine,
-      updateUI,
-      startTimer,
-      storageGet,
-      runtimeSendMessage,
-      tabsQuery,
-      tabsUpdate,
-      tabsCreate,
-      waitForPageLoad,
-      ensureLockedConversationTab
-    });
-    if (started) {
-      void taskLifecycle.processNextTask();
-    }
-  });
-
-  bindStopControl({
-    stopBtn,
-    runState,
-    t,
-    stopTimer,
-    updateUI,
-    statusText,
-    onBeforeStop: () => taskLifecycle.cancelTaskWatchdog()
-  });
-  bindResetControl({
-    resetBtn,
-    runState,
-    t,
-    stopTimer,
-    updateUI,
-    storageClear,
-    runtimeSendMessage,
-    setLoadedTasks: (tasks) => {
-      loadedTasks = tasks;
-    },
-    fileInfo,
-    progressBar,
-    progressText,
-    elapsedTimeElement,
-    remainingTimeElement,
-    statusText,
-    currentFileNameEl,
-    jsonFileInput,
-    conversationUrlInput,
-    urlStatus,
-    onBeforeReset: () => taskLifecycle.cancelTaskWatchdog()
-  });
-
-  // Listen for messages from content script
-  chrome.runtime.onMessage.addListener((request: PanelMessage) => {
-    taskLifecycle.handlePanelMessage(request);
-  });
-
-  // UI Helpers
-  function updateUI(running: boolean) {
-    startBtn.disabled = running;
-    stopBtn.disabled = !running;
-    jsonFileInput.disabled = running;
+      else state.folderStatus.output.state = 'granted';
+      await refresh(); break;
+    case 'start':
+      await flushSession(); if(runtime) await runtime.start(); else {applyPreviewState(store,'running');store.render();} break;
+    case 'stop': if(runtime) await runtime.stop(); else {state.run.isRunning=false;state.run.outcome='stopped';state.run.endTime=Date.now();state.view='finished';store.render();} break;
+    case 'reset':
+      cancelSessionSave();
+      if(runtime) { resetting=true;try{await runtime.reset();}finally{resetting=false;} }
+      else {applyPreviewState(store,'setup');state.view='setup';store.render();} break;
+    case 'toggle-log': state.logCollapsed=!state.logCollapsed;await persist({logCollapsed:state.logCollapsed});store.render();break;
+    case 'log-all': state.logFilter='all';store.render();break;
+    case 'log-issues': state.logFilter='issues';store.render();break;
+    case 'clear-log': state.logs=[];store.render();break;
+    case 'copy-log': await copy(copyLogText(state),button);break;
+    case 'copy-session': await copy(state.run.sessionUrl,button);break;
+    case 'copy-filename': await copy(toSafeTaskFilename(state.run.taskQueue[state.run.currentIndex]?.name || '').replace(/\.[^.]+$/,''),button);break;
+    case 'open-chat': if(!preview) await chrome.tabs.create({url:state.run.sessionUrl || state.run.homeUrl,active:true});break;
+    case 'back-setup': state.view='setup';await refresh();break;
+    case 'rerun':
+      if(!state.run.sessionUrl) {state.view='setup';await refresh();break;}
+      state.sessionMode='existing';state.sessionUrls[state.platform]=state.run.sessionUrl;await flushSession();
+      await refresh();
+      if(runtime) await runtime.start();else{applyPreviewState(store,'running');store.render();}break;
   }
-
-  function formatTime(seconds: number) {
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return t("time.short", { minutes: m, seconds: s });
-  }
-
-  function startTimer() {
-    runState.startTime = Date.now();
-    if (timerInterval) {
-      clearInterval(timerInterval);
-    }
-    // Only update elapsed time every second (remaining time is updated only when tasks complete)
-    timerInterval = window.setInterval(() => {
-      const elapsedSeconds = Math.floor((Date.now() - runState.startTime) / 1000);
-      elapsedTimeElement.textContent = formatTime(elapsedSeconds);
-    }, 1000);
-  }
-
-  function stopTimer() {
-    if (timerInterval) {
-      clearInterval(timerInterval);
-      timerInterval = undefined;
-    }
-  }
-
-  // Update remaining time estimate (called when a task completes)
-  function updateRemainingTime() {
-    updateRemainingTimeLabel({
-      t,
-      startTime: runState.startTime,
-      completedTasks: runState.currentIndex,
-      totalTasks: runState.taskQueue.length,
-      formatTime,
-      setLabel: (label) => {
-        remainingTimeElement.textContent = label;
-      }
-    });
-  }
-
-  const notifyWarningPatternReload = async () => {
-    const tabIds = new Set<number>();
-    if (runState.currentTabId) {
-      tabIds.add(runState.currentTabId);
-    }
-
-    try {
-      const geminiTabs = await tabsQuery({ url: ["https://gemini.google.com/*"] });
-      geminiTabs.forEach((tab) => {
-        if (typeof tab.id === "number") {
-          tabIds.add(tab.id);
-        }
-      });
-    } catch (err) {
-      console.warn("[Panel] Failed to query Gemini tabs for warning pattern sync", err);
-    }
-
-    if (!tabIds.size) return;
-
-    await Promise.all(
-      Array.from(tabIds).map((tabId) =>
-        chrome.tabs
-          .sendMessage(tabId, { action: "RELOAD_WARNING_PATTERNS" })
-          .catch(() => undefined)
-      )
-    );
-  };
-
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local") return;
-    if (changes[LANGUAGE_STORAGE_KEY]) {
-      const nextLanguage = normalizeLanguage(
-        changes[LANGUAGE_STORAGE_KEY].newValue as string | undefined
-      );
-      if (nextLanguage !== currentLanguage) {
-        applyLanguage(nextLanguage);
-        refreshDynamicLabels();
-      }
-    }
-    if (changes[LOG_COLLAPSED_STORAGE_KEY]) {
-      applyLogCollapsed(Boolean(changes[LOG_COLLAPSED_STORAGE_KEY].newValue));
-    }
-    if (changes[CUSTOM_WARNING_PATTERNS_STORAGE_KEY]) {
-      void notifyWarningPatternReload();
-    }
-  });
+}
+document.addEventListener('click',event=>{
+  const button=(event.target as Element).closest<HTMLElement>('[data-action]');
+  if(!button || button instanceof HTMLButtonElement && button.disabled) return;
+  void handleAction(button).catch(error=>{store.addLog('error',error instanceof Error?error.message:String(error));});
 });
+document.addEventListener('input',event=>{
+  const input=event.target;
+  if(!(input instanceof HTMLInputElement)||input.id!=='sessionUrl'||state.run.isRunning||state.starting) return;
+  state.sessionUrls[state.platform]=input.value;state.setupMessage=undefined;
+  if(sessionSaveTimer) clearTimeout(sessionSaveTimer);
+  sessionSaveTimer=setTimeout(()=>{void flushSession().catch(error=>store.addLog('error',String(error)));},300);
+  store.render();
+});
+fileInput.addEventListener('change',()=>{if(fileInput.files?.[0]&&!preview) void loadTasksFile(store,fileInput.files[0]).then(refresh).catch(error=>store.addLog('error',String(error)));});
+
+async function init() {
+  if(preview) {applyPreviewState(store,parameters.get('preview') || 'setup');state.language=normalizeLanguage(parameters.get('lang') || undefined);store.render();return;}
+  await restoreInitialState(store);
+  const onMessage=(message:PanelMessage)=>runtime!.handlePanelMessage(message);
+  chrome.runtime.onMessage.addListener(onMessage);
+  const activeChanged=()=>{if(!state.run.isRunning&&!state.starting) void refresh();};
+  const onUpdated=(_tabId:number,change:chrome.tabs.TabChangeInfo)=>{if(change.url) activeChanged();};
+  chrome.tabs.onActivated.addListener(activeChanged);chrome.tabs.onUpdated.addListener(onUpdated);
+  const onStorage=(changes:Record<string,chrome.storage.StorageChange>,area:string)=>{
+    if(area!=='local') return;
+    const removed=(key:string)=>changes[key]?.oldValue!==undefined && changes[key]?.newValue===undefined;
+    const externalClear=removed('currentTaskRunSeq') || ((state.run.isRunning||state.starting)&&removed('loadedTasks')) || (removed('loadedTasks') && ['ui_platform','uiLanguage','settings_aspectRatio'].some(removed));
+    if(externalClear&&!resetting) {cancelSessionSave();resetting=true;void runtime!.reset({clearStorage:false}).finally(()=>{resetting=false;});return;}
+    if(changes.uiLanguage) state.language=normalizeLanguage(changes.uiLanguage.newValue);
+    if(changes.settings_aspectRatio) state.aspectRatio=(['1:1','3:4','4:3','9:16','16:9'].includes(changes.settings_aspectRatio.newValue)?changes.settings_aspectRatio.newValue:'16:9') as AspectRatio;
+    if(changes.settings_downloadTimeout) state.run.downloadTimeout=Number(changes.settings_downloadTimeout.newValue)||120;
+    if(changes.logCollapsed) state.logCollapsed=Boolean(changes.logCollapsed.newValue);
+    for(const platform of ['chatgpt','gemini'] as const) if(changes[`sessionUrl_${platform}`]) state.sessionUrls[platform]=changes[`sessionUrl_${platform}`].newValue || '';
+    if(changes.custom_warning_patterns) void chrome.tabs.query({url:['https://gemini.google.com/*','https://chatgpt.com/*']}).then(tabs=>Promise.allSettled(tabs.filter(tab=>tab.id!==undefined).map(tab=>chrome.tabs.sendMessage(tab.id!,{action:'RELOAD_WARNING_PATTERNS'}))));
+    if(!state.run.isRunning&&!state.starting&&(changes.sourceSubfolder||changes.outputSubfolder)) void refresh();
+    store.render();
+  };
+  chrome.storage.onChanged.addListener(onStorage);
+  window.addEventListener('unload',()=>{
+    cancelSessionSave();
+    chrome.runtime.onMessage.removeListener(onMessage);chrome.tabs.onActivated.removeListener(activeChanged);chrome.tabs.onUpdated.removeListener(onUpdated);chrome.storage.onChanged.removeListener(onStorage);runtime!.dispose();
+  },{once:true});
+  store.render();
+}
+void init().catch(error=>{store.addLog('error',String(error));});

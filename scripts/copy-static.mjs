@@ -9,7 +9,9 @@ const entries = [
   { src: "manifest.json", dest: "manifest.json" },
   { src: "sidepanel.html", dest: "sidepanel.html" },
   { src: "options.html", dest: "options.html" },
-  { src: "docs", dest: "docs" }
+  { src: "docs", dest: "docs" },
+  { src: "styles", dest: "styles" },
+  { src: "assets", dest: "assets" }
 ];
 
 await mkdir(outDir, { recursive: true });

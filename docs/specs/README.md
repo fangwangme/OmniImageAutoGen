@@ -1,8 +1,5 @@
-# Specs
-Use this directory for product specs, technical specs, requirements, and acceptance criteria that should be shared through Git.
+# Specifications
 
-## Naming
-Name specs by module, feature area, or long-lived product surface. Do not prefix spec files with dates: `module-or-feature-name.md`
+- [Dual-platform image generation](dual-platform.md): normative types, URLs, tasks, storage, adapter interface, messages, download algorithm and view state.
 
-## Workflow
-For feature work, update or create the relevant spec before implementation planning. Keep dated decisions, implementation details, research, and review notes in `.agents/plans/` or `.agents/notes/`.
+Specifications describe product contracts shared through Git. Use stable module/feature filenames without dates. Dated decisions and local execution evidence belong in agent/local state, outside committed specs.

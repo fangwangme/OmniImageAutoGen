@@ -1,121 +1,47 @@
-# Nano Banana Image Generator Architecture
+# OmniImageAutoGen architecture
 
-This is the high-level architecture overview.
-For detailed logic, use `docs/README.md` as the entry index.
+OmniImageAutoGen is a Manifest V3 Chrome extension that runs one platform and one image task at a time. It automates a logged-in website session and saves native downloads through File System Access directory handles.
 
-## Runtime Flow (Overview)
+## Components
 
-1. `sidepanel` starts a run (`src/sidepanel.ts`).
-2. Task state machine executes (`src/sidepanel/taskLifecycle.ts`):
-   - load current task
-   - persist task index/run sequence for message scoping
-   - inject content module into Gemini tab
-   - reject stale task messages from prior runs
-   - verify output exists before accepting task completion
-   - handle retries/failures
-   - recreate tab between tasks
-   - watchdog hard-timeout fallback
-3. Content script performs one task (`src/content.ts`):
-   - validate locked conversation URL
-   - read task index/run sequence context for scoped reporting
-   - wait page/input readiness
-   - enforce history-image settle gate
-   - type/send prompt
-   - wait generation
-   - trigger download button
-   - report completion/error with task scope fields
-4. Background handles file operations (`src/background.ts`):
-   - poll source folder
-   - wait file stabilization
-   - hash check / duplicate guard
-   - move/rename to output folder
+| Component | Entry and modules | Responsibility |
+| --- | --- | --- |
+| Sidepanel | `src/sidepanel.ts`, `src/sidepanel/state.ts`, `taskLifecycle.ts`, `startRun.ts`, `sessionCapture.ts`, `views/*` | Setup/readiness, platform and session choice, validated tasks, queue/retry scheduling, tab lifecycle, stages, logs and finished summaries |
+| Content | `src/content.ts`, `src/content/runner.ts`, `adapters/*`, `dom.ts`, `warningText.ts` | One injected task: page interaction, message/reply binding, generation waiting and native download triggering |
+| Background | `src/background.ts`, `src/background/fsHandles.ts`, `downloadPipeline.ts` | Directory status and output lookup, download arms, scanning, stable decoding, format conversion, writing, verification and source deletion |
+| Options | `options.html`, `src/options.ts`, `styles/options.css` | Automatically saved language, folder permissions, ratio, timing/retry settings, warning patterns and Reset |
 
-## Source Structure (Overview)
+Pure policies live in `src/utils/*.js` with matching `.d.ts` declarations. BDD tests import these modules directly. UI uses TypeScript, DOM, CSS and locally bundled fonts.
 
-```text
-src/
-  background.ts
-  content.ts
-  content/
-    domHelpers.ts
-    generationWait.ts
-    historySettle.ts
-    historyWait.ts
-    interactions.ts
-    localization.ts
-    lockedUrl.ts
-    pageSelectors.ts
-    runtime.ts
-    uxActions.ts
-  sidepanel.ts
-  sidepanel/
-    chromeApi.ts
-    consoleTimestamp.ts
-    initState.ts
-    logView.ts
-    panelTypes.ts
-    remainingTime.ts
-    runControls.ts
-    startRun.ts
-    summaryLog.ts
-    tabHelpers.ts
-    taskLifecycle.ts
-    uiBindings.ts
-    urlLock.ts
-  utils/
-    contentHistoryWait.js
-    errorClassifier.js
-    historyLoadGate.js
-    lockedConversation.js
-    placeholderPolicy.js
-    retryPolicy.js
-    taskQueue.js
-    watchdogPolicy.js
-```
+## Run flow
 
-## Timeout Model (Overview)
+1. Setup validates tasks, the selected existing-session URL when applicable, and directory permissions.
+2. Start opens a new platform home page or reuses/opens the selected existing chat.
+3. Output names under the selected platform are compared ignoring case. The queue contains only missing images.
+4. The panel persists one task and a unique attempt sequence, then injects `content.js` with that sequence in its query string.
+5. Content validates its storage snapshot before creating a controller. Old imports and task messages cannot adopt a later task.
+6. The selected adapter writes the original prompt, confirms a new user message and waits for its paired reply.
+7. Content arms the background baseline before clicking one native download entry.
+8. Background detects, stabilizes and decodes the new image; it copies matching formats or transcodes to the target format.
+9. The output is verified before deleting the source. The panel independently checks output existence before accepting a save.
+10. The panel advances or retries after recreating its tab, preserving the captured chat URL.
 
-User-configurable settings are stored in extension local storage.
+## Sessions and outputs
 
-Primary defaults:
-- generation timeout: `120s`
-- download timeout (single end-to-end budget after click): `120s`
-- page stability timeout: `30s`
-- input timeout: `5s`
-- step delay: `1s`
-- poll interval: `1s`
+New sessions are supported directly. Gemini preserves the active tab's `/u/<n>` account prefix when building its home URL. A specific chat URL is captured from tab updates, with a final tab lookup after the first non-skipped completion. Subsequent tasks stay in that chat.
 
-Behavior:
-- Content/background enforce per-step timeouts.
-- Sidepanel watchdog is a hard fail-safe:
-  - `full`: `generationTimeout + downloadTimeout + 15s`
-  - `download-only`: `downloadTimeout + 15s`
-- Watchdog timeout marks task failed and proceeds, preventing infinite stuck loops.
-- Non-skipped completion requires file existence post-check (`CHECK_FILE_EXISTS`) with a `10s` hard timeout.
+Outputs are separated as `Output/chatgpt/<safe name>` and `Output/gemini/<safe name>`. The tuple `(platform, safe name ignoring case)` identifies a task for output lookup and retries.
 
-## Conversation Preconditions
+## Cancellation and recovery
 
-For stable operation, run on a locked existing conversation that already contains at least one generated image.
-Avoid fresh `new conversation` threads for production runs.
+Stop, Reset, task errors and watchdog expiry cancel the active download arm and invalidate the stored task context. Async panel transitions check run identity and sequence after awaits. Content controllers abort on changed or removed task scope.
 
-Reasoning:
-- retry-download mode depends on existing response/download targets in conversation history
-- history settle gate relies on prior image-load signals
-- fresh threads provide weaker targeting context and are more prone to race conditions
+A new arm waits for cancellation cleanup of the previous save. Newly created, unverified output files are removed after failed or cancelled writes, while source files remain available for retry. Verified output files are preserved.
 
-## Retry and Error Policy (Overview)
+Download errors retry download-only once a chat link exists. While a new session is still pending, they retry the full task. Folder and session errors halt immediately. The watchdog fails the task and advances without entering normal retries.
 
-- Error classification: `src/utils/errorClassifier.js`
-- Retry decision: `src/utils/retryPolicy.js`
-- Locked URL and folder permission errors stop immediately.
-- Download/generation errors retry within configured limits.
-- Consecutive-failure cap can stop the run.
+Reset clears local storage and background memory, while preserving IDB directory handles and images. Options and panel reset paths cancel pending UI saves so delayed timers cannot restore cleared settings.
 
-## Detailed Documents
+## Details
 
-- `docs/flow-sidepanel-task-lifecycle.md`
-- `docs/flow-content-execution.md`
-- `docs/flow-background-download-pipeline.md`
-- `docs/timeout-and-retry-model.md`
-- `docs/testing-and-quality.md`
-- `docs/troubleshooting-playbook.md`
+See the [documentation index](README.md), [normative specification](specs/dual-platform.md) and [testing guide](testing-and-quality.md).
