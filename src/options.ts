@@ -1,562 +1,184 @@
-import { setHandle, getHandle } from "./utils/idb.js";
-import {
-  applyI18n,
-  createTranslator,
-  DEFAULT_LANGUAGE,
-  getStoredLanguage,
-  Language,
-  LANGUAGE_STORAGE_KEY,
-  normalizeLanguage,
-  setStoredLanguage
-} from "./i18n.js";
-import {
-  compileWarningPattern,
-  CUSTOM_WARNING_PATTERNS_STORAGE_KEY,
-  MAX_CUSTOM_WARNING_PATTERNS,
-  sanitizeCustomWarningPatterns,
-  tryCompileWarningPattern
-} from "./utils/warningPatterns.js";
+import { getHandle, setHandle } from './utils/idb.js';
+import { createTranslator, normalizeLanguage, setStoredLanguage, type Language } from './i18n.js';
+import { sanitizeCustomWarningPatterns, tryCompileWarningPattern, MAX_CUSTOM_WARNING_PATTERNS, CUSTOM_WARNING_PATTERNS_STORAGE_KEY } from './utils/warningPatterns.js';
+import { toSafeTaskFilename } from './utils/taskQueue.js';
+import { validateTasks } from './utils/taskValidation.js';
+import { icon, escapeHtml as e } from './sidepanel/views/shared.js';
+import type { AspectRatio, TaskItem } from './types.js';
 
-type TimingSettings = {
-  settings_generationTimeout?: number;
-  settings_downloadTimeout?: number;
-  settings_pageLoadTimeout?: number;
-  settings_inputTimeout?: number;
-  settings_stepDelay?: number;
-  settings_taskInterval?: number;
-  settings_pollInterval?: number;
-  settings_inputPollInterval?: number;
-  settings_sendPollInterval?: number;
-  settings_generationPollInterval?: number;
-  settings_downloadPollInterval?: number;
-  settings_downloadStabilityInterval?: number;
-  settings_maxRetries?: number;
-  settings_maxConsecutiveFailures?: number;
-  custom_warning_patterns?: unknown;
-  outputSubfolder?: string;
-  sourceSubfolder?: string;
-  uiLanguage?: string;
-};
+type DirectoryPickerOptions = { id?:string;mode?:'read'|'readwrite';startIn?:FileSystemHandle|string };
+declare global { interface Window { showDirectoryPicker(options?:DirectoryPickerOptions):Promise<FileSystemDirectoryHandle>; } }
+const DEFAULTS = { generationTimeout:120,downloadTimeout:120,pageLoadTimeout:30,inputTimeout:5,stepDelay:1,taskInterval:5,pollInterval:1,maxRetries:3,maxConsecutiveFailures:5 };
+type TimingKey = keyof typeof DEFAULTS;
+const timingKeys = Object.keys(DEFAULTS) as TimingKey[];
+const legacyKeys=['settings_inputPollInterval','settings_sendPollInterval','settings_generationPollInterval','settings_downloadPollInterval','settings_downloadStabilityInterval','settings_downloadDetectTimeout','settings_downloadStabilityTimeout'];
+const sections=['general','folders','generation','timing','patterns','reset'] as const;
+const parameters=new URL(location.href).searchParams;
+const preview=parameters.has('preview') && !(globalThis.chrome && chrome.runtime && chrome.runtime.id);
+const root=document.getElementById('settingsRoot')!;
+let language:Language=normalizeLanguage(preview?parameters.get('lang') || undefined:undefined);
+let t=createTranslator(language),ratio:AspectRatio='16:9',patterns:string[]=[],exampleTask:TaskItem|undefined;
+let timingDrafts:Record<TimingKey,string>=Object.fromEntries(timingKeys.map(key=>[key,String(DEFAULTS[key])])) as Record<TimingKey,string>;
+let folders:{source:{name?:string;state:'granted'|'prompt'|'denied'|'missing'},output:{name?:string;state:'granted'|'prompt'|'denied'|'missing'}}={source:{state:'missing'},output:{state:'missing'}};
+let timingTimer:ReturnType<typeof setTimeout>|undefined,patternTimer:ReturnType<typeof setTimeout>|undefined,resetTimer:ReturnType<typeof setTimeout>|undefined;
+let confirmReset=false,currentSection='general';
+let observer:IntersectionObserver|undefined;
+let resetting=false,pendingWrites:Promise<void>=Promise.resolve();
+let optionsEpoch=0;
 
-type DirectoryPickerOptions = {
-  id?: string;
-  mode?: "read" | "readwrite";
-  startIn?: FileSystemHandle | string;
-};
-
-declare global {
-  interface Window {
-    showDirectoryPicker(
-      options?: DirectoryPickerOptions
-    ): Promise<FileSystemDirectoryHandle>;
-  }
+function queueWrite(write:()=>Promise<void>) {
+  if(preview||resetting)return Promise.resolve();
+  const epoch=optionsEpoch;
+  const operation=pendingWrites.then(()=>resetting||epoch!==optionsEpoch?undefined:write());
+  pendingWrites=operation.catch(()=>undefined);
+  return operation;
 }
-
-const storageGet = <T,>(keys: string[]): Promise<T> =>
-  chrome.storage.local.get(keys) as unknown as Promise<T>;
-
-const storageSet = (items: Record<string, unknown>): Promise<void> =>
-  chrome.storage.local.set(items) as unknown as Promise<void>;
-
-const storageRemove = (keys: string[]): Promise<void> =>
-  chrome.storage.local.remove(keys) as unknown as Promise<void>;
-
-const selectSourceBtn = document.getElementById(
-  "selectSourceBtn"
-) as HTMLButtonElement;
-const sourceStatus = document.getElementById("sourceStatus") as HTMLSpanElement;
-const selectOutputBtn = document.getElementById(
-  "selectOutputBtn"
-) as HTMLButtonElement;
-const outputStatus = document.getElementById("outputStatus") as HTMLSpanElement;
-
-// Timing Inputs
-const generationTimeoutInput = document.getElementById(
-  "generationTimeout"
-) as HTMLInputElement;
-const downloadTimeoutInput = document.getElementById(
-  "downloadTimeout"
-) as HTMLInputElement;
-const pageLoadTimeoutInput = document.getElementById(
-  "pageLoadTimeout"
-) as HTMLInputElement;
-const inputTimeoutInput = document.getElementById(
-  "inputTimeout"
-) as HTMLInputElement;
-const stepDelayInput = document.getElementById("stepDelay") as HTMLInputElement;
-const taskIntervalInput = document.getElementById(
-  "taskInterval"
-) as HTMLInputElement;
-const pollIntervalInput = document.getElementById(
-  "pollInterval"
-) as HTMLInputElement;
-const maxRetriesInput = document.getElementById(
-  "maxRetries"
-) as HTMLInputElement;
-const maxConsecutiveFailuresInput = document.getElementById(
-  "maxConsecutiveFailures"
-) as HTMLInputElement;
-const saveSettingsBtn = document.getElementById(
-  "saveSettingsBtn"
-) as HTMLButtonElement;
-const saveStatus = document.getElementById("saveStatus") as HTMLDivElement;
-const languageSelect = document.getElementById(
-  "languageSelect"
-) as HTMLSelectElement;
-const warningPatternsList = document.getElementById(
-  "warningPatternsList"
-) as HTMLDivElement;
-const addWarningPatternBtn = document.getElementById(
-  "addWarningPatternBtn"
-) as HTMLButtonElement;
-const warningPatternsStatus = document.getElementById(
-  "warningPatternsStatus"
-) as HTMLDivElement;
-
-let currentLanguage: Language = DEFAULT_LANGUAGE;
-let t = createTranslator(currentLanguage);
-let warningPatternDrafts: string[] = [];
-let warningPatternSaveTimer: number | undefined;
-
-const setDocumentLanguage = (language: Language) => {
-  document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
-  document.title = t("options.documentTitle");
-};
-
-const renderLanguageOptions = () => {
-  if (!languageSelect) return;
-  languageSelect.textContent = "";
-  const options = [
-    { value: "en", label: t("language.english") },
-    { value: "zh", label: t("language.chinese") }
-  ];
-  options.forEach((option) => {
-    const element = document.createElement("option");
-    element.value = option.value;
-    element.textContent = option.label;
-    languageSelect.appendChild(element);
-  });
-  languageSelect.value = currentLanguage;
-};
-
-const applyTranslations = () => {
-  applyI18n(document, t);
-  renderLanguageOptions();
-  setDocumentLanguage(currentLanguage);
-};
-
-const applyLanguage = (language: Language) => {
-  currentLanguage = language;
-  t = createTranslator(currentLanguage);
-  applyTranslations();
-  renderWarningPatternRows();
-};
-
-const setWarningPatternStatus = (message: string, type: "" | "success" | "error") => {
-  warningPatternsStatus.textContent = message;
-  warningPatternsStatus.className = type ? `status ${type}` : "status";
-};
-
-const arraysEqual = (left: string[], right: string[]) =>
-  left.length === right.length && left.every((value, index) => value === right[index]);
-
-const validateWarningPatternDrafts = () => {
-  const invalidIndexes = new Set<number>();
-  warningPatternDrafts.forEach((draft, index) => {
-    const trimmed = draft.trim();
-    if (!trimmed) return;
-    const result = tryCompileWarningPattern(trimmed);
-    if (!result.regex) {
-      invalidIndexes.add(index);
+const storageSet=(items:Record<string,unknown>)=>queueWrite(()=>chrome.storage.local.set(items));
+const toSecondsNumber=(value:string,fallback:number)=>{const parsed=Number.parseFloat(value);return Number.isNaN(parsed)||parsed<=0?fallback:parsed;};
+const toCountNumber=(value:string,fallback:number)=>{const parsed=Number.parseInt(value,10);return Number.isNaN(parsed)||parsed<0?fallback:parsed;};
+const validTiming=(key:TimingKey)=>{const value=Number(timingDrafts[key]);return timingDrafts[key].trim()!==''&&Number.isFinite(value)&&(key==='maxRetries'||key==='maxConsecutiveFailures'?value>=0:value>0);};
+const sectionHeader=(key:string,extra='')=>`<div class="section-header"><h2>${e(t('op.'+key))}</h2>${extra}</div>`;
+function setSaveStatus(error=false) {
+  const element=document.getElementById('saveStatus');if(!element)return;
+  element.innerHTML=`${icon(error?'alert':'check')}<span>${e(t(error?'op.saveFailed':'op.autoSave'))}</span>`;
+  element.className='save-status'+(error?' error':'');
+  if(!error){void element.offsetWidth;element.classList.add('saved');}
+}
+function renderFolder(folder:'source'|'output') {
+  const status=folders[folder],isGranted=status.state==='granted',missing=status.state==='missing';
+  const name=status.name || t('op.notSet'),example=toSafeTaskFilename(exampleTask?.name || '0000_000.png');
+  return `<div class="setting-row"><div class="setting-description folder-description"><span class="setting-label">${e(t('op.'+folder))}</span><span class="setting-help">${e(t('op.'+folder+'Help'))}</span><span class="folder-summary"><span class="folder-name">${e(name)}</span><span class="access-badge ${isGranted?'granted':missing?'':'needed'}">${e(t(isGranted?'op.accessGranted':missing?'op.notSet':'op.accessNeeded'))}</span></span>${folder==='output'?`<div class="folder-tree"><span>${e(status.name || 'Output')}/</span><span>├─ chatgpt/${e(example)}</span><span>└─ gemini/${e(example)}</span></div>`:''}</div><button type="button" class="control-button" data-action="folder" data-value="${folder}">${e(t('op.change'))}</button></div>`;
+}
+function renderTiming() {
+  return timingKeys.map(key=>`<div class="setting-row timing-row"><div class="setting-description"><label for="${key}">${e(t('op.'+key))}</label><span class="setting-help">${e(t('op.'+key+'Help'))}</span></div><div class="timing-control"><input id="${key}" class="timing-input" type="number" min="${key==='maxRetries'||key==='maxConsecutiveFailures'?'0':'0.001'}" step="${key==='maxRetries'||key==='maxConsecutiveFailures'?'1':'any'}" data-timing="${key}" value="${e(timingDrafts[key])}" aria-invalid="${!validTiming(key)}"><span class="timing-unit">${e(t(key==='maxRetries'?'op.times':key==='maxConsecutiveFailures'?'op.images':'op.sec'))}</span></div></div>`).join('');
+}
+function updateWatchdog() {
+  const element=document.getElementById('watchdogSeconds');
+  if(element)element.textContent=`${toSecondsNumber(timingDrafts.generationTimeout,120)+toSecondsNumber(timingDrafts.downloadTimeout,120)+15}s`;
+}
+function renderPatternRows() {
+  const element=document.getElementById('patternRows');if(!element)return;
+  element.innerHTML=patterns.map((value,index)=>`<div class="pattern-row"><label for="pattern${index}" class="visually-hidden">${e(t('op.pattern',{index:index+1}))}</label><input id="pattern${index}" class="pattern-input" type="text" autocomplete="off" spellcheck="false" data-pattern="${index}" value="${e(value)}"><button type="button" class="pattern-remove" data-action="remove-pattern" data-value="${index}" aria-label="${e(t('op.removePattern',{index:index+1}))}">${icon('close')}</button></div>`).join('');
+  const count=document.getElementById('patternCount');if(count)count.textContent=`${patterns.length} / ${MAX_CUSTOM_WARNING_PATTERNS}`;
+  const add=document.getElementById('addPattern') as HTMLButtonElement|null;if(add)add.disabled=patterns.length>=MAX_CUSTOM_WARNING_PATTERNS;
+  validatePatterns();
+}
+function validatePatterns() {
+  const invalid=patterns.map((value,index)=>value.trim()&&!tryCompileWarningPattern(value.trim()).regex?index:-1).filter(index=>index>=0);
+  root.querySelectorAll<HTMLInputElement>('[data-pattern]').forEach(input=>input.setAttribute('aria-invalid',String(invalid.includes(Number(input.dataset.pattern)))));
+  const status=document.getElementById('patternError');if(status)status.textContent=invalid.length?t('op.patternsInvalid',{count:invalid.length}):'';
+  return invalid;
+}
+function trackSections() {
+  observer?.disconnect();
+  observer=new IntersectionObserver(entries=>{
+    const visible=entries.filter(entry=>entry.isIntersecting).sort((a,b)=>a.boundingClientRect.top-b.boundingClientRect.top);
+    if(visible[0])currentSection=visible[0].target.id;
+    root.querySelectorAll<HTMLAnchorElement>('.settings-nav a').forEach(link=>link.setAttribute('aria-current',String(link.hash==='#'+currentSection)));
+  },{rootMargin:'-80px 0px -60% 0px',threshold:0});
+  root.querySelectorAll('.settings-section').forEach(section=>observer!.observe(section));
+}
+function render() {
+  t=createTranslator(language);document.documentElement.lang=language==='zh'?'zh-CN':'en';document.title=`OmniImageAutoGen / ${t('op.settings')}`;
+  const example=toSafeTaskFilename(exampleTask?.name || '0000_000.png');
+  const prompt=exampleTask?exampleTask.prompt.slice(0,60)+(exampleTask.prompt.length>60?'…':''):'Editorial illustration, 16:9. [NARRATIVE] …';
+  root.innerHTML=`<header class="settings-header"><div class="header-inner"><div class="settings-logo"><svg width="28" height="28" viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2" y="6" width="14" height="14" rx="2"/><rect x="10" y="2" width="14" height="14" rx="2" class="logo-sheet"/><path d="M13 12l3-3 5 5"/></svg><span>OmniImageAutoGen</span><span>/ ${e(t('op.settings'))}</span></div><span id="saveStatus" class="save-status" role="status">${icon('check')}<span>${e(t('op.autoSave'))}</span></span></div></header><div class="settings-layout"><nav class="settings-nav" aria-label="${e(t('op.sections'))}">${sections.map(id=>`<a href="#${id}" aria-current="${currentSection===id}">${e(t('op.'+id))}</a>`).join('')}</nav><main class="settings-main"><section id="general" class="settings-section"><h2>${e(t('op.general'))}</h2><div class="settings-card"><div class="setting-row"><div class="setting-description"><label for="languageSelect">${e(t('op.language'))}</label><span class="setting-help">${e(t('op.languageHelp'))}</span></div><select id="languageSelect" class="language-select"><option value="en" ${language==='en'?'selected':''}>English</option><option value="zh" ${language==='zh'?'selected':''}>简体中文</option></select></div></div></section><section id="folders" class="settings-section"><h2>${e(t('op.folders'))}</h2><div class="settings-card">${renderFolder('source')}${renderFolder('output')}</div></section><section id="generation" class="settings-section"><h2>${e(t('op.generation'))}</h2><div class="settings-card"><fieldset class="setting-row ratio-fieldset" aria-labelledby="ratioLabel"><div class="setting-description"><legend id="ratioLabel">${e(t('op.ratio'))}</legend><span class="setting-help">${e(t('op.ratioHelp'))}</span></div><div class="ratio-segments">${(['1:1','3:4','4:3','9:16','16:9'] as const).map(value=>`<button type="button" data-action="ratio" data-value="${value}" aria-pressed="${ratio===value}">${value}</button>`).join('')}</div></fieldset><div class="prompt-example"><span class="setting-label">${e(t('op.whatSent'))}</span><span class="setting-help">${e(t('op.promptHelp'))}</span><pre>name: ${e(example)}\nprompt: ${e(prompt)}</pre></div></div></section><section id="timing" class="settings-section">${sectionHeader('timing',`<button type="button" class="link-button" data-action="defaults">${e(t('op.restoreDefaults'))}</button>`)}<div class="settings-card">${renderTiming()}<div class="watchdog-note">${icon('clock')}<span>${e(t('op.watchdogBefore'))} <span id="watchdogSeconds" class="mono"></span> ${e(t('op.watchdogAfter'))}</span></div></div></section><section id="patterns" class="settings-section">${sectionHeader('patterns','<span id="patternCount" class="pattern-count"></span>')}<div class="settings-card"><div class="pattern-help">${e(t('op.patternsHelp'))} <span class="mono">*</span> ${e(t('op.wildcardHelp'))} <span class="mono">/regex/flags</span>.</div><div class="pattern-content"><div id="patternRows" class="pattern-rows"></div><div id="patternError" class="pattern-error" role="alert"></div><button id="addPattern" type="button" class="pattern-add" data-action="add-pattern">${icon('plus')}${e(t('op.addPattern'))}</button></div></div></section><section id="reset" class="settings-section"><h2>${e(t('op.reset'))}</h2><div class="settings-card setting-row reset-card"><div class="setting-description folder-description"><span class="setting-label">${e(t('op.resetEverything'))}</span><span class="setting-help">${e(t('op.resetHelp'))}</span></div><button type="button" class="control-button reset-button ${confirmReset?'confirm':''}" data-action="reset">${e(t(confirmReset?'op.confirmReset':'op.resetButton'))}</button></div></section></main></div>`;
+  updateWatchdog();renderPatternRows();trackSections();
+}
+async function readFolders() {
+  const epoch=optionsEpoch;
+  const statuses=await Promise.all((['source','output'] as const).map(async folder=>{
+    const handle=await getHandle<FileSystemDirectoryHandle>(folder+'Handle');
+    if(!handle)return {state:'missing' as const};
+    return {name:handle.name,state:handle.queryPermission?await handle.queryPermission({mode:'readwrite'}):'prompt' as const};
+  }));
+  if(epoch===optionsEpoch)folders={source:statuses[0],output:statuses[1]};
+}
+function resetDrafts() {
+  optionsEpoch++;
+  if(timingTimer)clearTimeout(timingTimer);if(patternTimer)clearTimeout(patternTimer);if(resetTimer)clearTimeout(resetTimer);
+  timingTimer=patternTimer=resetTimer=undefined;
+  confirmReset=false;language='en';ratio='16:9';patterns=[];exampleTask=undefined;
+  timingDrafts=Object.fromEntries(timingKeys.map(key=>[key,String(DEFAULTS[key])])) as Record<TimingKey,string>;
+  render();
+  const epoch=optionsEpoch;
+  void readFolders().then(()=>{if(epoch===optionsEpoch)render();}).catch(()=>setSaveStatus(true));
+}
+async function saveTiming() {
+  if(timingKeys.some(key=>!validTiming(key))){setSaveStatus(true);return;}
+  const values=Object.fromEntries(timingKeys.map(key=>['settings_'+key,key==='maxRetries'||key==='maxConsecutiveFailures'?toCountNumber(timingDrafts[key],DEFAULTS[key]):toSecondsNumber(timingDrafts[key],DEFAULTS[key])]));
+  await storageSet(values);if(!preview)await chrome.storage.local.remove(legacyKeys);setSaveStatus();
+}
+async function savePatterns() {
+  if(validatePatterns().length){setSaveStatus(true);return;}
+  await storageSet({[CUSTOM_WARNING_PATTERNS_STORAGE_KEY]:sanitizeCustomWarningPatterns(patterns.map(value=>value.trim()).filter(Boolean))});setSaveStatus();
+}
+async function handleAction(button:HTMLElement) {
+  const value=button.dataset.value;
+  switch(button.dataset.action){
+    case 'folder': {
+      if(preview)return;
+      const folder=value as 'source'|'output';
+      try {
+        const handle=await window.showDirectoryPicker({id:'gemini-autogen-'+folder,mode:'readwrite'});
+        await setHandle(folder+'Handle',handle);await storageSet({[folder+'Subfolder']:handle.name});
+        await readFolders();render();setSaveStatus();
+      }catch(error){if(!(error instanceof DOMException&&error.name==='AbortError'))throw error;}
+      break;
     }
-  });
-  return invalidIndexes;
-};
-
-const applyWarningPatternValidation = (invalidIndexes: Set<number>) => {
-  const inputs = warningPatternsList.querySelectorAll<HTMLInputElement>(
-    ".warning-pattern-input"
-  );
-  inputs.forEach((input, index) => {
-    const invalid = invalidIndexes.has(index);
-    input.classList.toggle("invalid", invalid);
-    input.setAttribute("aria-invalid", invalid ? "true" : "false");
-  });
-};
-
-async function persistWarningPatterns(showSuccess = false) {
-  const invalidIndexes = validateWarningPatternDrafts();
-  applyWarningPatternValidation(invalidIndexes);
-  if (invalidIndexes.size > 0) {
-    setWarningPatternStatus(
-      t("options.warningPatterns.invalid", {
-        count: invalidIndexes.size
-      }),
-      "error"
-    );
-    return;
-  }
-
-  const normalizedDrafts = warningPatternDrafts
-    .map((draft) => draft.trim())
-    .filter(Boolean);
-  normalizedDrafts.forEach((draft) => {
-    compileWarningPattern(draft);
-  });
-  const patterns = sanitizeCustomWarningPatterns(normalizedDrafts);
-  await storageSet({
-    [CUSTOM_WARNING_PATTERNS_STORAGE_KEY]: patterns
-  });
-  if (showSuccess) {
-    setWarningPatternStatus(
-      t("options.warningPatterns.saved", {
-        count: patterns.length
-      }),
-      "success"
-    );
-  } else if (warningPatternsStatus.classList.contains("error")) {
-    setWarningPatternStatus("", "");
+    case 'ratio': ratio=value as AspectRatio;await storageSet({settings_aspectRatio:ratio});root.querySelectorAll<HTMLElement>('[data-action=ratio]').forEach(element=>element.setAttribute('aria-pressed',String(element.dataset.value===ratio)));setSaveStatus();break;
+    case 'defaults':
+      if(timingTimer)clearTimeout(timingTimer);
+      timingDrafts=Object.fromEntries(timingKeys.map(key=>[key,String(DEFAULTS[key])])) as Record<TimingKey,string>;
+      root.querySelectorAll<HTMLInputElement>('[data-timing]').forEach(input=>{input.value=timingDrafts[input.dataset.timing as TimingKey];input.setAttribute('aria-invalid','false');});updateWatchdog();await saveTiming();break;
+    case 'add-pattern':
+      if(patterns.length>=MAX_CUSTOM_WARNING_PATTERNS){document.getElementById('patternError')!.textContent=t('op.patternsMax',{max:MAX_CUSTOM_WARNING_PATTERNS});return;}
+      patterns.push('');renderPatternRows();root.querySelector<HTMLInputElement>(`[data-pattern="${patterns.length-1}"]`)?.focus();break;
+    case 'remove-pattern':patterns.splice(Number(value),1);renderPatternRows();if(patternTimer)clearTimeout(patternTimer);await savePatterns();break;
+    case 'reset':
+      if(!confirmReset){confirmReset=true;button.classList.add('confirm');button.textContent=t('op.confirmReset');resetTimer=setTimeout(()=>{confirmReset=false;const current=root.querySelector<HTMLElement>('[data-action=reset]');current?.classList.remove('confirm');if(current)current.textContent=t('op.resetButton');},4000);return;}
+      if(resetting)return;
+      resetting=true;
+      if(resetTimer)clearTimeout(resetTimer);if(timingTimer)clearTimeout(timingTimer);if(patternTimer)clearTimeout(patternTimer);
+      if(!preview){await pendingWrites;await chrome.storage.local.clear();await chrome.runtime.sendMessage({action:'RESET_STATE'});}
+      location.reload();break;
   }
 }
-
-const scheduleWarningPatternSave = () => {
-  if (warningPatternSaveTimer) {
-    clearTimeout(warningPatternSaveTimer);
-  }
-  warningPatternSaveTimer = window.setTimeout(() => {
-    void persistWarningPatterns();
-  }, 250);
-};
-
-function renderWarningPatternRows() {
-  warningPatternsList.textContent = "";
-  if (!warningPatternDrafts.length) {
-    const empty = document.createElement("div");
-    empty.className = "warning-pattern-empty";
-    empty.textContent = t("options.warningPatterns.empty");
-    warningPatternsList.appendChild(empty);
-    setWarningPatternStatus("", "");
-    return;
-  }
-
-  warningPatternDrafts.forEach((draft, index) => {
-    const row = document.createElement("div");
-    row.className = "warning-pattern-row";
-
-    const input = document.createElement("input");
-    input.type = "text";
-    input.className = "warning-pattern-input";
-    input.placeholder = t("options.warningPatterns.inputPlaceholder");
-    input.value = draft;
-    input.autocomplete = "off";
-    input.addEventListener("input", () => {
-      warningPatternDrafts[index] = input.value;
-      scheduleWarningPatternSave();
-      applyWarningPatternValidation(validateWarningPatternDrafts());
-    });
-
-    const removeBtn = document.createElement("button");
-    removeBtn.type = "button";
-    removeBtn.className = "warning-pattern-remove";
-    removeBtn.textContent = "×";
-    removeBtn.title = t("options.warningPatterns.removeAria");
-    removeBtn.setAttribute("aria-label", t("options.warningPatterns.removeAria"));
-    removeBtn.addEventListener("click", () => {
-      warningPatternDrafts.splice(index, 1);
-      renderWarningPatternRows();
-      void persistWarningPatterns(true);
-    });
-
-    row.appendChild(input);
-    row.appendChild(removeBtn);
-    warningPatternsList.appendChild(row);
-  });
-
-  applyWarningPatternValidation(validateWarningPatternDrafts());
-}
-
-const setWarningPatternDraftsFromStorage = (value: unknown) => {
-  warningPatternDrafts = sanitizeCustomWarningPatterns(value);
-  renderWarningPatternRows();
-};
-
-// Default Values (seconds)
-const DEFAULTS = {
-  settings_generationTimeout: 120,
-  settings_downloadTimeout: 120,
-  settings_pageLoadTimeout: 30,
-  settings_inputTimeout: 5,
-  settings_stepDelay: 1,
-  settings_taskInterval: 5,
-  settings_pollInterval: 1,
-  settings_maxRetries: 3,
-  settings_maxConsecutiveFailures: 5
-};
-
-// Load saved settings
-async function loadSettings() {
-  const result = await storageGet<TimingSettings>([
-    "outputSubfolder",
-    "sourceSubfolder",
-    LANGUAGE_STORAGE_KEY,
-    "settings_generationTimeout",
-    "settings_downloadTimeout",
-    "settings_pageLoadTimeout",
-    "settings_inputTimeout",
-    "settings_stepDelay",
-    "settings_taskInterval",
-    "settings_pollInterval",
-    "settings_inputPollInterval",
-    "settings_sendPollInterval",
-    "settings_generationPollInterval",
-    "settings_downloadPollInterval",
-    "settings_downloadStabilityInterval",
-    "settings_maxRetries",
-    "settings_maxConsecutiveFailures",
-    CUSTOM_WARNING_PATTERNS_STORAGE_KEY
-  ]);
-
-  // Set Timing Inputs (or defaults)
-  generationTimeoutInput.value = String(
-    result.settings_generationTimeout ?? DEFAULTS.settings_generationTimeout
-  );
-  downloadTimeoutInput.value = String(
-    result.settings_downloadTimeout ?? DEFAULTS.settings_downloadTimeout
-  );
-  pageLoadTimeoutInput.value = String(
-    result.settings_pageLoadTimeout ?? DEFAULTS.settings_pageLoadTimeout
-  );
-  inputTimeoutInput.value = String(
-    result.settings_inputTimeout ?? DEFAULTS.settings_inputTimeout
-  );
-  stepDelayInput.value = String(
-    result.settings_stepDelay ?? DEFAULTS.settings_stepDelay
-  );
-  taskIntervalInput.value = String(
-    result.settings_taskInterval ?? DEFAULTS.settings_taskInterval
-  );
-  const fallbackPollInterval =
-    result.settings_pollInterval ??
-    result.settings_generationPollInterval ??
-    result.settings_downloadPollInterval ??
-    result.settings_inputPollInterval ??
-    result.settings_sendPollInterval ??
-    result.settings_downloadStabilityInterval ??
-    DEFAULTS.settings_pollInterval;
-  pollIntervalInput.value = String(fallbackPollInterval);
-  maxRetriesInput.value = String(
-    result.settings_maxRetries ?? DEFAULTS.settings_maxRetries
-  );
-  maxConsecutiveFailuresInput.value = String(
-    result.settings_maxConsecutiveFailures ?? DEFAULTS.settings_maxConsecutiveFailures
-  );
-
-  // Check Source Handle
-  const sourceHandle = await getHandle<FileSystemDirectoryHandle>("sourceHandle");
-  if (sourceHandle) {
-    sourceStatus.textContent = t("options.status.selected", {
-      name: sourceHandle.name
-    });
-    sourceStatus.className = "status success";
-  } else if (result.sourceSubfolder) {
-    sourceStatus.textContent = t("options.status.savedNeedsReselect", {
-      name: result.sourceSubfolder
-    });
-  }
-
-  // Check Output Handle
-  const outputHandle = await getHandle<FileSystemDirectoryHandle>("outputHandle");
-  if (outputHandle) {
-    outputStatus.textContent = t("options.status.selected", {
-      name: outputHandle.name
-    });
-    outputStatus.className = "status success";
-  } else if (result.outputSubfolder) {
-    outputStatus.textContent = t("options.status.savedNeedsReselect", {
-      name: result.outputSubfolder
-    });
-  }
-
-  setWarningPatternDraftsFromStorage(result.custom_warning_patterns);
-}
-
-function toSecondsNumber(value: string, fallback: number) {
-  const parsed = Number.parseFloat(value);
-  if (Number.isNaN(parsed) || parsed <= 0) return fallback;
-  return parsed;
-}
-
-function toCountNumber(value: string, fallback: number) {
-  const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed) || parsed < 0) return fallback;
-  return parsed;
-}
-
-// Save Timing Settings
-saveSettingsBtn.addEventListener("click", async () => {
-  try {
-    const settings = {
-      settings_generationTimeout: toSecondsNumber(
-        generationTimeoutInput.value,
-        DEFAULTS.settings_generationTimeout
-      ),
-      settings_downloadTimeout: toSecondsNumber(
-        downloadTimeoutInput.value,
-        DEFAULTS.settings_downloadTimeout
-      ),
-      settings_pageLoadTimeout: toSecondsNumber(
-        pageLoadTimeoutInput.value,
-        DEFAULTS.settings_pageLoadTimeout
-      ),
-      settings_inputTimeout: toSecondsNumber(
-        inputTimeoutInput.value,
-        DEFAULTS.settings_inputTimeout
-      ),
-      settings_stepDelay: toSecondsNumber(
-        stepDelayInput.value,
-        DEFAULTS.settings_stepDelay
-      ),
-      settings_taskInterval: toSecondsNumber(
-        taskIntervalInput.value,
-        DEFAULTS.settings_taskInterval
-      ),
-      settings_pollInterval: toSecondsNumber(
-        pollIntervalInput.value,
-        DEFAULTS.settings_pollInterval
-      ),
-      settings_maxRetries: toCountNumber(
-        maxRetriesInput.value,
-        DEFAULTS.settings_maxRetries
-      ),
-      settings_maxConsecutiveFailures: toCountNumber(
-        maxConsecutiveFailuresInput.value,
-        DEFAULTS.settings_maxConsecutiveFailures
-      )
-    };
-
-    await storageSet(settings);
-    await storageRemove([
-      "settings_inputPollInterval",
-      "settings_sendPollInterval",
-      "settings_generationPollInterval",
-      "settings_downloadPollInterval",
-      "settings_downloadStabilityInterval",
-      "settings_downloadDetectTimeout",
-      "settings_downloadStabilityTimeout"
-    ]);
-
-    saveStatus.textContent = t("options.status.settingsSaved");
-    saveStatus.className = "status success";
-    setTimeout(() => {
-      saveStatus.textContent = "";
-    }, 3000);
-  } catch (err) {
-    console.error(err);
-    saveStatus.textContent = t("options.status.errorSaving");
-    saveStatus.className = "status error";
-  }
+root.addEventListener('click',event=>{
+  const button=(event.target as Element).closest<HTMLElement>('[data-action]');
+  if(!button||button instanceof HTMLButtonElement&&button.disabled)return;
+  void handleAction(button).catch(()=>setSaveStatus(true));
 });
-
-addWarningPatternBtn.addEventListener("click", () => {
-  if (warningPatternDrafts.length >= MAX_CUSTOM_WARNING_PATTERNS) {
-    setWarningPatternStatus(
-      t("options.warningPatterns.maxReached", {
-        max: MAX_CUSTOM_WARNING_PATTERNS
-      }),
-      "error"
-    );
-    return;
-  }
-  warningPatternDrafts.push("");
-  renderWarningPatternRows();
-  const inputs = warningPatternsList.querySelectorAll<HTMLInputElement>(
-    ".warning-pattern-input"
-  );
-  const latestInput = inputs[inputs.length - 1];
-  if (latestInput) {
-    latestInput.focus();
-  }
+root.addEventListener('input',event=>{
+  const input=event.target;if(!(input instanceof HTMLInputElement))return;
+  if(input.dataset.timing){const key=input.dataset.timing as TimingKey;timingDrafts[key]=input.value;input.setAttribute('aria-invalid',String(!validTiming(key)));updateWatchdog();if(timingTimer)clearTimeout(timingTimer);timingTimer=setTimeout(()=>{void saveTiming().catch(()=>setSaveStatus(true));},400);}
+  if(input.dataset.pattern!==undefined){patterns[Number(input.dataset.pattern)]=input.value;validatePatterns();if(patternTimer)clearTimeout(patternTimer);patternTimer=setTimeout(()=>{void savePatterns().catch(()=>setSaveStatus(true));},250);}
 });
-
-const initLanguage = async () => {
-  const storedLanguage = await getStoredLanguage();
-  applyLanguage(storedLanguage);
-};
-
-void initLanguage().then(loadSettings);
-
-// Select Source Folder
-selectSourceBtn.addEventListener("click", async () => {
-  try {
-    const handle = await window.showDirectoryPicker({
-      id: "gemini-autogen-source",
-      mode: "readwrite"
-    });
-
-    await setHandle("sourceHandle", handle);
-    await storageSet({ sourceSubfolder: handle.name });
-
-    sourceStatus.textContent = t("options.status.selected", {
-      name: handle.name
-    });
-    sourceStatus.className = "status success";
-  } catch (err) {
-    console.error(err);
-  }
+root.addEventListener('change',event=>{
+  const input=event.target;if(!(input instanceof HTMLSelectElement)||input.id!=='languageSelect')return;
+  language=normalizeLanguage(input.value);render();
+  void queueWrite(()=>setStoredLanguage(language)).then(()=>setSaveStatus()).catch(()=>setSaveStatus(true));
 });
-
-// Select Output Folder
-selectOutputBtn.addEventListener("click", async () => {
-  try {
-    const handle = await window.showDirectoryPicker({
-      id: "gemini-autogen-output",
-      mode: "readwrite"
-    });
-
-    await setHandle("outputHandle", handle);
-    await storageSet({ outputSubfolder: handle.name });
-
-    outputStatus.textContent = t("options.status.selected", {
-      name: handle.name
-    });
-    outputStatus.className = "status success";
-  } catch (err) {
-    console.error(err);
-  }
-});
-
-if (languageSelect) {
-  languageSelect.addEventListener("change", async () => {
-    const selected = normalizeLanguage(languageSelect.value);
-    await setStoredLanguage(selected);
-    applyLanguage(selected);
-    await loadSettings();
-  });
+async function init() {
+  if(preview){folders={source:{name:'Downloads',state:'granted'},output:{name:'Output',state:'granted'}};patterns=['*content policy*','/try again later/i'];render();return;}
+  const onStorage=(changes:Record<string,chrome.storage.StorageChange>,area:string)=>{
+    if(area!=='local')return;
+    const resetKeys=[...timingKeys.map(key=>'settings_'+key),'uiLanguage','ui_platform','settings_aspectRatio','sourceSubfolder','outputSubfolder','currentTaskRunSeq'];
+    if(resetKeys.some(key=>changes[key]?.oldValue!==undefined&&changes[key]?.newValue===undefined)){resetDrafts();return;}
+    if(changes.uiLanguage&&normalizeLanguage(changes.uiLanguage.newValue)!==language){language=normalizeLanguage(changes.uiLanguage.newValue);render();}
+    if(changes.custom_warning_patterns){const next=sanitizeCustomWarningPatterns(changes.custom_warning_patterns.newValue),current=sanitizeCustomWarningPatterns(patterns.map(value=>value.trim()).filter(Boolean));if(JSON.stringify(next)!==JSON.stringify(current)){patterns=next;renderPatternRows();}}
+  };
+  const onMessage=(message:{action?:string})=>{if(message.action==='RESET_STATE')resetDrafts();};
+  chrome.storage.onChanged.addListener(onStorage);
+  chrome.runtime.onMessage.addListener(onMessage);
+  window.addEventListener('unload',()=>{if(timingTimer)clearTimeout(timingTimer);if(patternTimer)clearTimeout(patternTimer);if(resetTimer)clearTimeout(resetTimer);observer?.disconnect();chrome.storage.onChanged.removeListener(onStorage);chrome.runtime.onMessage.removeListener(onMessage);},{once:true});
+  const epoch=optionsEpoch,stored=await chrome.storage.local.get(null);
+  if(epoch!==optionsEpoch)return;
+  language=normalizeLanguage(stored.uiLanguage);ratio=(['1:1','3:4','4:3','9:16','16:9'].includes(stored.settings_aspectRatio)?stored.settings_aspectRatio:'16:9') as AspectRatio;
+  for(const key of timingKeys)timingDrafts[key]=String(stored['settings_'+key]??(key==='pollInterval'?stored.settings_generationPollInterval??stored.settings_downloadPollInterval??stored.settings_inputPollInterval??stored.settings_sendPollInterval??stored.settings_downloadStabilityInterval:undefined)??DEFAULTS[key]);
+  patterns=sanitizeCustomWarningPatterns(stored.custom_warning_patterns);
+  const validation=validateTasks(stored.loadedTasksRaw??stored.loadedTasks);if(!('fatal' in validation))exampleTask=validation.tasks[0];
+  await readFolders();if(epoch!==optionsEpoch)return;render();
+  if(location.hash)requestAnimationFrame(()=>document.getElementById(location.hash.slice(1))?.scrollIntoView());
 }
-
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local") return;
-  if (changes[LANGUAGE_STORAGE_KEY]) {
-    const nextLanguage = normalizeLanguage(
-      changes[LANGUAGE_STORAGE_KEY].newValue as string | undefined
-    );
-    if (nextLanguage !== currentLanguage) {
-      applyLanguage(nextLanguage);
-      void loadSettings();
-    }
-  }
-  if (changes[CUSTOM_WARNING_PATTERNS_STORAGE_KEY]) {
-    const nextPatterns = sanitizeCustomWarningPatterns(
-      changes[CUSTOM_WARNING_PATTERNS_STORAGE_KEY].newValue
-    );
-    const currentPersistedPatterns = sanitizeCustomWarningPatterns(
-      warningPatternDrafts
-    );
-    if (!arraysEqual(nextPatterns, currentPersistedPatterns)) {
-      warningPatternDrafts = nextPatterns;
-      renderWarningPatternRows();
-    }
-  }
-});
-
-export {};
+void init().catch(()=>{render();setSaveStatus(true);});
