@@ -58,8 +58,6 @@ Gemini home paths after removing the account prefix are `/app`, `/app/` and `/`.
 
 Failure is `{ok:false,code,message,detectedPlatform?}`; message comes from i18n. `normalizeSessionUrl` compares origin plus pathname with trailing slash removed, ignoring query/hash. `sessionUrlsMatch` compares those normalized values.
 
-The legacy locked-conversation helper retains its exports as a compatibility wrapper over these policies.
-
 ## 4. Tasks, prompt and paths
 
 `validateTasks(raw)` returns `{fatal:"not-array"}` for a non-array, otherwise `{tasks,issues,total}`.

@@ -8,11 +8,9 @@ bun run build
 bun run test:bdd:quiet
 ```
 
-The committed BDD suite contains 77 scenarios across 16 files. The eight new files add 38 scenarios for platform/session URLs, legacy migration, task validation, prompt formatting, platform output keys, download selection, image-format decisions and readiness.
+The BDD test suite covers platform and session URL validation, state migration, task validation, prompt formatting, platform output keys, candidate download selection, image format decisions, run readiness, retry and watchdog policies, filename/queue filtering, window protection, and content history wait.
 
-Existing coverage retains error/retry/watchdog policies, filename/queue rules, window protection, history wait and URL compatibility. The history-wait regression gives an existing unloaded image precedence over text-warning detection.
-
-The suite imports pure JavaScript policy modules. Chrome DOM interaction, filesystem integration and image encoding are not fully covered by those committed tests. A Node reporter may summarize test files rather than individual scenarios; retain failure status and relevant assertions as evidence.
+The suite imports pure JavaScript policy modules. Chrome DOM interaction, filesystem integration and image encoding are verified via preview/integration checks. A Node reporter may summarize test files rather than individual scenarios; retain failure status and relevant assertions as evidence.
 
 ## Regression evidence
 
