@@ -39,10 +39,10 @@ In `chrome://extensions/`, choose **Load unpacked** and select `.local/dist`. Cl
 1. Sign in to the selected platform in Chrome.
 2. In Chrome's download settings, turn off **Ask where to save each file before downloading**.
 3. Open the extension's **Settings**. Set **Source folder** to Chrome's automatic download directory and **Output folder** to the final destination.
-4. Grant read/write access to both directories. The extension displays directory names, such as `Downloads` and `Output`.
+4. Grant read/write access to both directories. The extension displays directory names, such as `Downloads` and `Output`. Chrome's File System Access API may require clicking **Allow again** after a browser restart.
 5. Set the language, aspect ratio and timeouts as needed. Changes save automatically.
 
-The output directory gets separate `chatgpt/` and `gemini/` subdirectories. A download's source file is removed only after the output has been written and verified. Reset preserves directory handles and output images.
+The output directory gets separate `chatgpt/` and `gemini/` subdirectories (`Output/<platform>/<safe filename>`). When upgrading from earlier versions, existing root outputs are kept intact without collision. Adapters support both English and Chinese website interfaces. A download's source file is removed only after the output has been written and verified. Reset preserves directory handles and output images.
 
 ## Usage
 

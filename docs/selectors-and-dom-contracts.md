@@ -8,13 +8,13 @@ Selectors are centralized in `src/content/adapters/gemini.ts` and `chatgpt.ts`. 
 | --- | --- |
 | Composer | `.ql-editor.textarea[contenteditable="true"]`, with scoped editor/textbox fallbacks |
 | Page ready | Document complete, visible composer and chat container/main, no visible loading spinner |
-| Image mode | `button[aria-label="Upload & tools"]`; Create image `button[role="menuitemcheckbox"]` |
+| Image mode | `button[aria-label="Upload & tools"]` (with localized `上传和工具` / `工具` fallbacks); Create image `button[role="menuitemcheckbox"]` (`Create images` / `创建图片` / `生成图片`) |
 | Selected image mode | Visible `button[aria-label="Deselect Images"]` or menu item's `aria-checked="true"` |
-| Ratio | `button[aria-label^="Aspect ratio"]`; option `[role="menuitemradio"][aria-label="<ratio>"]` |
-| Send/stop | `Send message` / `Stop response` aria labels, with existing button fallbacks |
+| Ratio | `button[aria-label^="Aspect ratio"]` / `button[aria-label^="宽高比"]`; option `[role="menuitemradio"]` matching ratio via regex `/\b(1:1|3:4|4:3|9:16|16:9)\b/` |
+| Send/stop | `Send message` / `Stop response` aria labels (with localized `发送消息` / `停止回答` fallbacks), with existing button fallbacks |
 | User and reply | `user-query` and its closest `.conversation-container` |
 | Generation | Reply's `model-response [aria-busy="true"]`, footer complete, loaded generated image |
-| Download | Current container's `button[aria-label="Download full size image"]`, with specific download-component fallbacks |
+| Download | Current container's `button[aria-label="Download full size image"]` (with `下载全尺寸图片` / `下载原图` fallbacks), with specific download-component fallbacks |
 
 An already-selected image mode must not be clicked again. The ratio option is not assumed to be a button. Global historical `aria-busy` does not block page readiness.
 
@@ -27,15 +27,15 @@ Download lookup remains within the bound conversation container. It hovers the i
 | Purpose | Primary contract |
 | --- | --- |
 | Composer | `div.ProseMirror[contenteditable="true"]`, with composer textbox fallbacks |
-| Image mode | Tools `button[aria-label="Add files and more"]`; Create image `button[data-list-navigation-item]` |
+| Image mode | Tools `button[aria-label="Add files and more"]` (with localized `添加文件等内容` / `附件` fallbacks); Create image `button[data-list-navigation-item]` (`Create image` / `创建图片`) |
 | Selected image mode | Composer's `[data-inline-selection-pill][data-system-hint-type="picture_v2"]` |
-| Send/stop | `button[aria-label="Send"]` / `button[aria-label="Stop"]`, with data-testid fallbacks |
+| Send/stop | `button[aria-label="Send prompt"]` / `button[aria-label="Send"]` (localized `发送提示` / `发送`); stop `button[aria-label="Stop streaming"]` / `button[aria-label="Stop"]` (localized `停止`) |
 | User message | `[data-user-message-bubble]`, read using `innerText` |
 | Assistant markers | `h4[data-conversation-role="assistant"]`; blocks after the bound user and before the next user |
 | Completion | Last paired turn's `data-talvt-turn-state="complete"` |
 | Generated image | Paired blocks' `[data-testid="generated-image-preview"] img` |
-| Viewer | A `[role="dialog"]` titled **Image preview** |
-| Viewer download/close | That dialog's `button[aria-label="Download"]` / `button[aria-label="Close viewer"]` |
+| Viewer | A `[role="dialog"]` titled **Image preview** or **图片预览** |
+| Viewer download/close | That dialog's `button[aria-label="Download"]` / `button[aria-label="下载"]` and `button[aria-label="Close"]` / `button[aria-label="关闭"]` / `button[aria-label="Close viewer"]` |
 
 Prompt insertion preserves the composer image pill. A paste event is preferred, with insertText fallback; selecting all composer contents would remove the pill. Image mode is checked for each task because it may not survive sending/reopening.
 
@@ -52,4 +52,4 @@ Generated images are identified within paired assistant blocks, not by their alt
 - Warning patterns inspect reply text without including the user's prompt.
 - Missing image-mode controls warn and continue; missing bound download controls fail the task.
 
-Site changes should be repaired within the relevant adapter, then checked with scoped event/verbose logs and a two-task manual run. Non-English site UI remains a manual compatibility check.
+Adapters include bilingual English and Chinese selector fallbacks for primary buttons and dialogs. Other non-English site UI remains a manual compatibility check.
