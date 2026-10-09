@@ -1,97 +1,44 @@
-# Content Execution Flow
+# Content execution flow
 
-This document describes single-task execution in `src/content.ts`.
+`src/content.ts` handles one injected task. `src/content/runner.ts` implements platform-independent flow through `src/content/adapters/gemini.ts` or `chatgpt.ts`.
 
-## Entry
+## Entry and task isolation
 
-`content.ts` is injected dynamically per task and runs as an IIFE.
-It loads settings and reads the current task from storage.
+The panel imports `content.js?v=<sequence>&taskRunSeq=<sequence>`. Entry checks the expected sequence against storage, then reads a fresh task/index/sequence/platform snapshot before creating a controller. A delayed old import cannot adopt a later task or abort its controller.
 
-## Stage Breakdown
+Only after scope is validated does warning-pattern initialization replace previous listeners and load custom rules. Each content scope aborts when its task is removed or its index/sequence changes. Actions and reported messages carry the task index and sequence.
 
-## 1) Pre-check
+## Full generation
 
-- load current task + task mode + locked URL + `currentTaskIndex` + `currentTaskRunSeq`
-- build safe target filename
-- `CHECK_FILE_EXISTS` to skip already completed outputs
+1. Build the existing safe target filename and check output existence for the selected platform. Existing output reports `TASK_COMPLETE` with `skipReason:"exists"`.
+2. Assert the selected chat URL matches the page. While a new session is pending, the page must be the selected platform's home route before typing and sending.
+3. Wait for page/input readiness. Existing sessions also wait for history to settle.
+4. Scroll down and prepare image mode. Gemini selects the configured aspect ratio. Missing mode/ratio controls produce a warning and a skipped meta label, then continue.
+5. Snapshot current user messages, write `name: <safe filename>\nprompt: <original prompt>` and confirm sending.
+6. Confirm a new user-message element after the baseline that contains the name anchor. Send is clicked at most twice; a confirmed new message is never sent again.
+7. Bind its reply scope and wait for a loaded generated image plus an available native download entry.
+8. A completed text-only response matching a warning rule reports `skipReason:"warning"` and an excerpt. A non-warning text-only reply or generation timeout is a generation failure.
+9. Arm background before clicking one native download entry, then wait for background save and verification.
+10. Report completion; the panel performs its own output existence post-check.
 
-If exists, task reports `TASK_COMPLETE(skipped=true)` immediately.
+The prompt is not trimmed or rewritten, and no aspect-ratio line is appended.
 
-## 2) Locked URL Guard
+## Download-only recovery
 
-- validate locked URL format/domain/path
-- assert current page URL matches locked URL before critical actions
-- operational requirement: use an existing conversation with at least one generated image; avoid fresh `new conversation` threads
+A captured/locked chat is required. After output and URL pre-checks, locate the last user message matching the task's name anchor. Mark image mode and send as reused, wait for that reply's loaded image/download readiness, then run the same arm/download/save handshake. No new prompt is sent.
 
-Any mismatch raises `locked-url` error.
+If the original reply cannot be found, the error is classified as generation and normal policy can choose a full retry.
 
-Why this requirement improves stability:
+## Platform interaction
 
-- download-only retry needs an existing response container/download button target
-- history settle logic is more reliable when prior generated-image state exists
-- fresh threads have weaker anchor context and are more prone to mis-targeting/race
+Gemini scopes reply images and `Download full size image` to the current `.conversation-container`. An already-selected Create image checkbox is left selected.
 
-## 3) Page and History Readiness
+ChatGPT keeps the image pill while inserting prompt text, reads user messages with `innerText`, and binds assistant blocks between that user bubble and the next user bubble. It opens the last generated-image preview in those blocks, locates the dialog titled **Image preview**, clicks its **Download** once and closes the viewer afterward.
 
-- wait for Gemini page ready (input + app container + no active loading gate)
-- run history-image settle gate:
-  - no image yet -> wait
-  - last image exists but not loaded -> wait
-  - last response matches built-in/custom warning patterns -> warning takes precedence, bypass last-image wait
-  - last image loaded -> continue
+## Download handshake and reporting
 
-This prevents sending prompt while previous generation is unfinished.
+Content sends `DOWNLOAD_ARM`, awaits a baseline-ready response, clicks once, and sends `WAIT_AND_SAVE`. Its response timeout is the configured download budget plus 5 seconds; background owns the actual download deadline.
 
-## 4) Prompt Send
+Content emits scoped stage updates and short event logs. Verbose diagnostic logs remain available in copied logs. Errors use `generation`, `download`, `folder` or `locked-url`; cancellation exits without completing another task.
 
-- scroll to bottom
-- focus input and clear stale text
-- write composed prompt (`name: ...` + `prompt: ...`)
-- wait send button ready
-- click send
-- verify input is cleared after send
-
-## 5) Response Targeting
-
-- wait user-query render
-- wait new conversation container if available
-- locate prompt anchor from rendered query text
-- resolve response container for that anchor
-
-This minimizes cross-message mis-targeting in long history threads.
-
-## 6) Generation Wait
-
-Implemented in `src/content/generationWait.ts`.
-
-Signals used:
-
-- response readiness (`aria-busy`, footer complete, loaded image)
-- new image candidates in target container
-- scoped download button availability
-- text-only warning detection using built-in + `custom_warning_patterns`
-
-No-progress timeout triggers `generation` error.
-
-If warning is detected for current response, task is marked `TASK_COMPLETE(skipped=true)` so prompt can be revised.
-
-## 7) Download Trigger
-
-- choose nearest/last valid download button in target container
-- reveal/hover/focus/click
-- click menu item for download when needed
-- call background `WAIT_AND_RENAME`
-- use one end-to-end download budget: `settings_downloadTimeout`
-  - content-side response race timeout: `settings_downloadTimeout`
-  - background detect/stabilize/rename: same global `settings_downloadTimeout` deadline
-
-Download response is enforced with race timeout and mapped to `download` or `folder` errors.
-
-## 8) Completion/Error Reporting
-
-- success -> `TASK_COMPLETE` with `taskIndex` + `taskRunSeq`
-- failure -> `TASK_ERROR` with typed error classification + `taskIndex` + `taskRunSeq`
-
-All status/log updates are mirrored through runtime messages for sidepanel visibility.
-Sidepanel performs an additional `CHECK_FILE_EXISTS` verification before accepting non-skipped completion.
-That post-check has a hard `10s` timeout; timeout is classified as `download` error.
+See [adapter/DOM contracts](selectors-and-dom-contracts.md) and [message protocol](protocol-message-contracts.md).

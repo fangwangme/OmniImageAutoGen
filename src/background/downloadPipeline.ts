@@ -109,7 +109,7 @@ async function stableFile(arm: ActiveArm, name: string, deadline: number, interv
 
 export async function waitAndSave(armId: string, t: Translator): Promise<SaveResult> {
   const arm = activeArm;
-  if (!arm || arm.id !== armId || arm.waiting) return { success: false, error: "Download not armed", errorType: "download" };
+  if (!arm || arm.id !== armId || arm.waiting) return { success: false, error: t("errors.downloadNotArmed"), errorType: "download" };
   arm.waiting = true;
   let finishCleanup: () => void = () => undefined;
   const cleanupComplete = new Promise<void>(resolve => { finishCleanup = resolve; });
@@ -152,7 +152,7 @@ export async function waitAndSave(armId: string, t: Translator): Promise<SaveRes
         if (decideSaveAction(sniffImageMime(bytes), targetMime) === "transcode") {
           const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
           const context = canvas.getContext("2d");
-          if (!context) throw new Error("Image conversion unavailable");
+          if (!context) throw new Error(t("errors.imageConversionUnavailable"));
           context.drawImage(bitmap, 0, 0);
           outBlob = await canvas.convertToBlob({ type: targetMime, quality: targetMime === "image/jpeg" ? 0.95 : undefined });
         }
@@ -178,9 +178,9 @@ export async function waitAndSave(armId: string, t: Translator): Promise<SaveRes
         arm.writer = undefined;
         assertActive(arm);
         const savedFile = await (await dir.getFileHandle(arm.targetFilename)).getFile();
-        if (!savedFile.size || sniffImageMime(await savedFile.arrayBuffer()) !== targetMime) throw new Error("Output verification failed");
+        if (!savedFile.size || sniffImageMime(await savedFile.arrayBuffer()) !== targetMime) throw new Error(t("errors.outputVerificationFailed"));
         let verified: ImageBitmap;
-        try { verified = await createImageBitmap(savedFile); } catch { throw new Error("Output verification failed"); }
+        try { verified = await createImageBitmap(savedFile); } catch { throw new Error(t("errors.outputVerificationFailed")); }
         verified.close();
         verifiedTarget = true;
         assertBeforeDeadline();

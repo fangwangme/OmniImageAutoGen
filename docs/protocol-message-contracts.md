@@ -1,164 +1,81 @@
-# Protocol: Runtime Message Contracts
+# Runtime message contracts
 
-This document defines the runtime message protocol between sidepanel, content, and background.
+Background routes filesystem/control requests and relays content logs. Content reports task state via runtime broadcasts. Sidepanel accepts task updates only for its active queue index and attempt sequence.
 
-## Channel Topology
-
-- `sidepanel -> background`: extension-level commands (`chrome.runtime.sendMessage`)
-- `content -> background`: file checks/rename + log relay
-- `background -> sidepanel`: relayed log events (`PANEL_LOG`)
-- `content -> sidepanel`: task status via runtime broadcast (`TASK_COMPLETE`, `TASK_ERROR`, `UPDATE_STATUS`)
-
-## Message Schemas
-
-## Sidepanel/Content -> Background
-
-### `CHECK_FILE_EXISTS`
-
-Request:
+## Shared types
 
 ```ts
-{ action: "CHECK_FILE_EXISTS"; filename: string }
+type PlatformId = "chatgpt" | "gemini";
+type TaskErrorType = "generation" | "download" | "folder" | "locked-url";
+type TaskScope = { taskIndex: number; taskRunSeq: number };
+type StageId = "open-session" | "image-mode" | "send-prompt" | "generate" | "download" | "save";
+type StageStatus = "todo" | "active" | "done" | "reused" | "skipped";
 ```
 
-Response:
+Task-originated requests/reports include `TaskScope`. Background retains that scope in the download arm and relayed logs.
+
+## Filesystem and control requests
+
+Every request below includes its `action`.
+
+| Action | Sender | Additional request fields | Response |
+| --- | --- | --- | --- |
+| `CHECK_FILE_EXISTS` | Content/panel | `platform, filename` | `{exists}` or `{exists:false,error,errorType}` |
+| `LIST_ALL_FILES` | Panel | `platform` | `{files:string[]}`; failures also carry error/type |
+| `FOLDER_STATUS` | Panel | none | `{source:{name?,state},output:{name?,state}}` |
+| `DOWNLOAD_ARM` | Content | `platform,targetFilename,taskIndex,taskRunSeq` | `{ok:true,armId}` or `{ok:false,error,errorType}` |
+| `WAIT_AND_SAVE` | Content | `armId` | `{success:true,filename}` or `{success:false,error,errorType,cancelled?}` |
+| `DOWNLOAD_CANCEL` | Panel | `reason` | `{ok:true}` |
+| `OPEN_OPTIONS` | Panel | none | Opens Options |
+| `RESET_STATE` | Panel/Options | none | `{success:true}`; cancels arm and resets hash |
+
+Folder `state` is `granted | prompt | denied | missing`. Status reads never prompt for access. Output lookup uses `Output/<platform>/`; a missing subdirectory is an empty result and is not created during lookup.
+
+An arm response guarantees the pre-click source baseline is ready. An unknown, stale or already-waiting arm ID cannot start another wait.
+
+## Task reports
 
 ```ts
-{ exists: boolean; error?: string; errorType?: "folder" | "download" | "generation" }
-```
-
-### `WAIT_AND_RENAME`
-
-Request:
-
-```ts
-{ action: "WAIT_AND_RENAME"; targetFilename: string }
-```
-
-Response:
-
-```ts
-{
-  success: boolean;
-  filename?: string;
-  error?: string;
-  errorType?: "folder" | "download" | "generation";
-}
-```
-
-### `LIST_ALL_FILES`
-
-Request:
-
-```ts
-{ action: "LIST_ALL_FILES" }
-```
-
-Response:
-
-```ts
-{ files: string[] }
-```
-
-### `RESET_STATE`
-
-Request:
-
-```ts
-{ action: "RESET_STATE" }
-```
-
-Response:
-
-```ts
-{ success: true }
-```
-
-### `OPEN_OPTIONS`
-
-Request:
-
-```ts
-{ action: "OPEN_OPTIONS" }
-```
-
-## Content -> Sidepanel
-
-### `TASK_COMPLETE`
-
-```ts
-{
+type TaskStage = TaskScope & {
+  action: "TASK_STAGE";
+  stage: StageId;
+  status: StageStatus;
+  meta?: string;
+};
+type TaskComplete = TaskScope & {
   action: "TASK_COMPLETE";
   skipped: boolean;
-  taskIndex?: number;
-  taskRunSeq?: number;
-}
-```
-
-### `TASK_ERROR`
-
-```ts
-{
+  skipReason?: "exists" | "warning";
+  warningExcerpt?: string;
+};
+type TaskError = TaskScope & {
   action: "TASK_ERROR";
   error: string;
-  errorType?: "generation" | "download" | "folder" | "locked-url";
-  taskIndex?: number;
-  taskRunSeq?: number;
-}
-```
-
-### `UPDATE_STATUS`
-
-```ts
-{
+  errorType?: TaskErrorType;
+};
+type UpdateStatus = TaskScope & {
   action: "UPDATE_STATUS";
   status: string;
   isError?: boolean;
-  taskIndex?: number;
-  taskRunSeq?: number;
-}
+};
 ```
 
-`taskIndex` + `taskRunSeq` are used by sidepanel to reject stale messages from previous task runs.
+Content reports image/send/generation/download stages; background reports save active/done. The panel owns open-session timing. Advancing an active stage completes the previous active stage and records its duration.
 
-## Log Relay
+Non-skipped completion is accepted only after a platform output existence check, with a 10-second post-check timeout. Missing output or timeout enters download error policy.
 
-### Content -> Background
+## Log relay and warning reload
 
-```ts
-{
-  action: "LOG";
-  level: "log" | "warn" | "error";
-  message: string;
-  data?: unknown;
-  source?: string; // "content"
-}
-```
+`LOG` carries `level,message,data?,source,event?,verbose?` plus task scope. Background replies `{ok:true}` and broadcasts `PANEL_LOG` with the same fields and a timestamp.
 
-### Background -> Sidepanel
+Levels include `info,ok,warn,error`; legacy diagnostic `log` maps to info in panel storage. Short event lines are visible. Verbose diagnostics are hidden in the log card but included when copying logs. The panel stores at most 2,000 entries and filters Issues to non-verbose warn/error entries.
 
-```ts
-{
-  action: "PANEL_LOG";
-  level: "log" | "warn" | "error";
-  message: string;
-  data?: unknown;
-  source?: string;
-  timestamp: string; // local-time string: YYYY-MM-DD HH:mm:ss.SSS GMT±HH:MM
-}
-```
+`RELOAD_WARNING_PATTERNS` is sent to tabs matching both supported platform domains after custom rules change. Content initializes listeners only after confirming the current task scope.
 
-## Error Semantics
+## Isolation and cancellation
 
-- `locked-url`: URL validation/mismatch; stop immediately.
-- `folder`: directory handle/permission errors; stop immediately.
-- `download`: download detect/rename timeout or related failures; retry policy applies.
-- `generation`: model output / DOM progress / prompt-anchor failures; retry policy applies.
+Each attempt has a monotonic sequence in storage and the injected module query string. Content compares the expected sequence and a fresh storage snapshot before replacing a controller. Background validates scope before arming; panel checks task reports and scoped logs before rendering.
 
-## Completion Consistency Guard
+Stop, Reset, task errors and watchdog expiry cancel the arm and invalidate current task context. Async panel transitions check their run identity after waits. Late completion, error, stage or initialization work cannot advance a later run.
 
-When sidepanel receives `TASK_COMPLETE(skipped=false)`, it performs `CHECK_FILE_EXISTS` for the target filename before advancing queue index.
-
-- if file exists: accept completion
-- if file missing: convert to `download` error and enter retry policy
-- if post-check call times out (`10s`): convert to `download` error and enter retry policy
+Error semantics are session mismatch `locked-url`, directory access `folder`, download/save `download`, and reply/generation `generation`. See [retry policy](timeout-and-retry-model.md).

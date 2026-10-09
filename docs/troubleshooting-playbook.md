@@ -1,72 +1,53 @@
-# Troubleshooting Playbook
+# Troubleshooting playbook
 
-Use this checklist for stuck tasks, repeated failures, or timeout confusion.
+## Readiness
 
-## 1) Confirm Build/Load Baseline
+When Start is disabled, use the listed categories: session link, prompts file, source folder and output folder.
 
-1. `npm run typecheck`
-2. `npm run build`
-3. Reload extension in `chrome://extensions`
+- Existing mode needs a specific chat URL belonging to the selected platform.
+- New mode opens the platform home page; Gemini carries over the active tab's account prefix.
+- Task items require non-empty name/prompt strings. Conflicting safe filenames ignore case, and Windows reserved base names are rejected.
+- **Choose…** opens folder settings; **Allow again** requests renewed read/write permission.
 
-## 2) Identify Failure Stage from Log
+## Generation
 
-Look for latest content log marker:
+Use the stage list and copied log to locate a failure. The visible log shows short events; copied logs also contain verbose diagnostics.
 
-- `Waiting for page ready`
-- `Waiting for history images to settle`
-- `Typing prompt...`
-- `Waiting for generation`
-- `Clicking download`
-- `Waiting for file...`
+A missing image-mode control warns and continues. A missing composer, send acknowledgment, paired reply or download entry fails generation. Website DOM changes should be repaired in the corresponding adapter.
 
-This tells which module likely failed.
+ChatGPT prompt insertion must preserve the image pill. Gemini's selected Create image checkbox must stay selected. If a text-only reply matches warning rules, the item is skipped with an excerpt; a non-warning text-only reply is a generation error.
 
-## 3) Watchdog Snapshot
+## Session link errors
 
-On watchdog timeout, inspect appended snapshot:
+The new link is captured from the task tab, then retained for subsequent tasks and runs. If capture is still pending after the first non-skipped completion, the final tab lookup must find a specific chat URL or the run halts.
 
-- `href`
-- `ready`
-- `containers`
-- `queries`
-- `images`
-- `downloadBtns`
-- `hasInput`
+Use **Open chat**, copy a valid conversation link and select Existing session. Example URL shapes are `https://gemini.google.com/u/<n>/app/<id>` and `https://chatgpt.com/c/<id>`.
 
-Typical interpretation:
-- no input: Gemini editor selector drift
-- images present but no download buttons: download selector drift
-- containers/queries zero: wrong tab or locked URL mismatch
+An existing chat that redirects elsewhere may indicate login/account changes. Confirm the selected account and supplied chat URL before retrying.
 
-## 4) Common Root Causes
+## Download and save failures
 
-- Locked URL mismatch after tab recreate
-- Using a fresh `new conversation` thread with no prior generated image history
-- Gemini DOM selector change
-- Source/output folder permission loss
-- Download file naming changed and widening logic not catching quickly
-- Network slow causing long non-progress phases
+1. Confirm Source is Chrome's actual automatic download directory.
+2. Turn off Chrome's request to choose a save location for each download.
+3. Confirm source/output read/write permissions.
+4. Check the single download budget. Native original downloads may take longer than previews.
+5. Look for a complete PNG/JPG/JPEG/WebP source file. Temporary `.crdownload` files are ignored.
+6. Confirm the output under the selected platform subdirectory.
 
-## 5) Fast Recovery
+The background baseline is recorded before clicking. Detection uses new filenames plus modification time, then stable size and decoding. It does not depend on the website's native filename.
 
-1. Stop run
-2. Reset in sidepanel
-3. Verify locked URL points to specific conversation
-4. Prefer a conversation that already has at least one generated image (not a fresh new conversation)
-5. Re-check folder permissions in options
-6. Re-run with small task subset
+Conversion or output verification failure retains the source. Newly created unverified output is cleaned before retry, avoiding a false already-saved result. The preserved consecutive duplicate-image guard deletes the duplicate source and classifies generation failure.
 
-## 6) Missing Image After Run
+## Retry and Stop
 
-If summary says task completed but output is missing:
+Captured-session download failures retry without sending a prompt. Pending-session download failures retry the full task. If download-only cannot find the original reply, policy can retry full.
 
-1. Confirm logs include `Completion verification failed: missing ...`
-2. Check whether retry policy switched to download-only retries afterward
-3. Validate source/output folders for delayed or failed rename
+Stop cancels the background arm and invalidates content. Late reports cannot change a stopped or later attempt. **Run remaining** checks current outputs and uses the retained chat; **Back to setup** lets you change platform/session choices.
 
-## 7) What to Capture for Debugging
+## Reset and diagnostics
 
-- full sidepanel log block for one failed task
-- watchdog snapshot line
-- first content error stack line
-- whether output file was created in source folder or not
+Reset clears local settings, tasks and session links, while preserving directory handles and output images. Pending UI save timers are cancelled so old drafts cannot restore cleared settings. If Settings reset fails, the page restores its save controls and shows the save error.
+
+For an issue report, capture the failed task's copied log, stage, timeout settings, permission status, native file arrival and output presence/format. Treat logs as private until sanitized: replace chat URLs with placeholders and remove personal paths or sensitive prompt data.
+
+Build/reload with `bun run typecheck`, `bun run build` and `bun run test:bdd:quiet`. For verification scope, see [testing and quality](testing-and-quality.md).

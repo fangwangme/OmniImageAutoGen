@@ -1,73 +1,54 @@
-# State Machines
+# Runtime state machines
 
-This document formalizes runtime state transitions.
+## Panel views
 
-## Sidepanel Run State Machine
+```mermaid
+stateDiagram-v2
+  [*] --> setup
+  setup --> running: Start passes readiness and has queued tasks
+  setup --> setup: Invalid setup or all outputs present
+  running --> finished: Queue completed
+  running --> finished: Stop or hard halt
+  finished --> setup: Back to setup
+  finished --> running: Run remaining with retained chat
+  running --> setup: Reset
+  finished --> setup: Reset
+```
 
-State holder: `TaskLifecycleState` in `src/sidepanel/taskLifecycle.ts`.
+View is `setup | running | finished`. Finished run outcomes are `finished | stopped | halted`; the running outcome is `running`. Setup readiness distinguishes Ready and Not ready without introducing another view.
 
-## States
+## Tasks and stages
 
-- `idle`: no active run
-- `running`: processing queue
-- `stopping`: transient via stop/reset actions
-- `finished`: all tasks complete
-- `failed-stopped`: run aborted due to stop policy
+Tasks record `saved | skipped-exists | skipped-warning | failed`. Results are indexed by queue position; retry counters use platform plus case-insensitive safe name.
 
-## Transitions
+Stage IDs are `open-session,image-mode,send-prompt,generate,download,save`. Each stores status `todo | active | done | reused | skipped`, timestamps and optional metadata.
 
-1. `idle -> running`
-   - trigger: Start button + successful `startRun` pre-flight
-2. `running -> running`
-   - trigger: `TASK_COMPLETE` verified by output existence check and more tasks remain
-   - action: increment index, recreate tab, process next
-3. `running -> running`
-   - trigger: retry policy action (`retry-download` / `retry-full`)
-   - action: re-run same index with mode override
-4. `running -> failed-stopped`
-   - trigger: `stop-locked-url`, `stop-folder`, `fail-stop`, user stop/reset
-5. `running -> finished`
-   - trigger: current index >= queue length
-6. `running -> running`
-   - trigger: watchdog timeout
-   - action: mark current failed, advance index
-7. `running -> running`
-   - trigger: stale `TASK_COMPLETE` / `TASK_ERROR` / `UPDATE_STATUS`
-   - action: ignore message by task index/run sequence guard
+A new active stage completes the previous active stage. Download-only recovery reuses image mode, send and generation as appropriate. New task processing resets stages, keeping the measured open-session stage.
 
-## Content Task State Machine
+## Session state
 
-Entry: injected module execution (`src/content.ts`).
+`new -> pending -> captured`: open the computed home URL, capture a specific chat route after send, then lock subsequent tasks to that URL. Existing mode starts with a validated URL and no pending capture.
 
-## Stages
+If a download fails while pending, the next attempt is full. Once captured, download-only recovery can reuse the reply. Missing capture after the first non-skipped completion is a hard halt.
 
-1. `load-config`
-2. `load-task`
-3. `skip-check`
-4. `locked-url-guard`
-5. `page-ready`
-6. `history-settle`
-7. `prompt-send`
-8. `target-resolve`
-9. `generation-wait`
-10. `download-trigger`
-11. `report-complete` or `report-error`
+## Run transitions
 
-Any stage exception routes to `report-error`.
+Completion is scoped to the active index/sequence. Saved completion also requires an output post-check. Accepted results reset consecutive failures and advance.
 
-## Background Download State Machine
+Normal errors choose full/download-only retry, fail-next or fail-stop through the existing retry policy. Session and folder errors halt immediately. A watchdog expiry fails the current task and advances without a normal retry.
 
-Entry: `WAIT_AND_RENAME`.
+Stop cancels downloads, increments sequence, invalidates content and preserves results. Reset cancels work and clears local state; external reset avoids recursive clearing. Delayed async transitions recheck run identity before mutating state.
 
-## Stages
+## Download arm
 
-1. `resolve-handles`
-2. `snapshot-initial-files`
-3. `poll-new-file`
-4. `stabilize-file`
-5. `validate-image`
-6. `hash-check`
-7. `move-rename`
-8. `return-success` / `return-error`
+`unarmed -> armed -> waiting -> candidate -> stable -> decoded -> written -> verified -> saved`
 
-`poll-new-file` and `stabilize-file` are both bounded by one global timeout budget (`settings_downloadTimeout`).
+- Arm records the pre-click baseline and timestamp.
+- Waiting and stabilization share the download deadline.
+- A temporary decode failure returns to waiting.
+- Cancellation invalidates the arm and aborts writing.
+- Failure/cancellation cleans newly created unverified output before another arm reuses its name.
+- Verified success removes source and updates the previous-image hash.
+- Duplicate source hash fails as generation under the preserved duplicate guard.
+
+The active arm has one wait. A new arm cancels the old arm, waits for cleanup and rechecks task scope.

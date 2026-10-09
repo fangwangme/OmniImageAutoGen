@@ -1,56 +1,48 @@
-# Timeout and Retry Model
+# Timeout and retry model
 
-This document defines timeout ownership and retry behavior.
+Settings preserve their existing names/defaults. Timing values are seconds, with a default generation budget of 120, download budget of 120, page-load budget of 30, input budget of 5, step delay of 1, task interval of 5 and polling interval of 1.
 
-## Timeout Layers
+## Budget ownership
 
-## Content Layer (`src/content.ts`)
+| Layer | Wait | Budget |
+| --- | --- | --- |
+| Content | Page/input readiness | Input timeout |
+| Content | Existing history settle | Page-load timeout × 2 |
+| Content | Send-button readiness | max(input timeout, step delay × 5) |
+| Content | Acknowledgment after Send | max(10s, input timeout × 2), at most two clicks |
+| Content | Generation | Generation timeout |
+| Content | No progress | min(generation timeout, max(page-load timeout, 15s)) |
+| Content | Background response | Download timeout + 5s |
+| Background | Scan, stabilize, decode, convert, write and verify | One deadline from arm time: download timeout |
+| Panel | Tab load | Page-load timeout, followed by readiness delay |
+| Panel | Completion output post-check | 10s |
 
-- generation wait: `settings_generationTimeout`
-- input/page waits: `settings_inputTimeout`
-- history settle gate budget: `settings_pageLoadTimeout * 2`
-- send wait budget: `max(inputTimeout, stepDelay * 5)`
-- local download response race timeout: `settings_downloadTimeout`
+Background controls the actual download deadline. There is no separate short trigger timeout or menu fallback timeout. The arm's timestamp is recorded before content clicks, so opening a native viewer is part of that budget.
 
-## Background Layer (`src/background.ts`)
+Each polling/stability round checks cancellation and invokes an extension API to help keep the service worker alive. Conversion/writing/verification are guarded against cancellation and deadline expiry.
 
-- `WAIT_AND_RENAME` uses one global deadline: `settings_downloadTimeout`
-- polling + stabilization + rename pipeline must complete within that single budget
+## Watchdog
 
-## Sidepanel Layer (`src/sidepanel/taskLifecycle.ts`)
+The unchanged hard-budget formulas are:
 
-- watchdog hard timeout:
-  - `full`: `generationTimeout + downloadTimeout + 15s`
-  - `download-only`: `downloadTimeout + 15s`
-- watchdog is fail-safe, not primary business timeout
-- completion consistency guard: non-skipped `TASK_COMPLETE` must pass `CHECK_FILE_EXISTS`, otherwise treated as `download` error
-- completion consistency guard has a hard check timeout (`10s`) to avoid panel-side deadlock
+- Full attempt: `generationTimeout + downloadTimeout + 15s`.
+- Download-only: `downloadTimeout + 15s`.
 
-## Retry Policy
+Watchdog expiry cancels the arm, invalidates content, marks failure and advances without normal retry. It is a fallback to prevent an indefinitely stuck task.
 
-Policy source: `src/utils/retryPolicy.js`.
+## Normal retry policy
 
-Inputs:
-- error classification
-- current retry count
-- max retries
-- consecutive failure count
-- max consecutive failures
+Default maximum retries is 3, meaning up to 4 attempts. Default consecutive-failure limit is 5; a zero limit disables that threshold.
 
-Actions:
-- `stop-locked-url`
-- `stop-folder`
-- `retry-download`
-- `retry-full`
-- `fail-next`
-- `fail-stop`
+| Error | Decision |
+| --- | --- |
+| Session URL mismatch or uncaptured required link | Halt immediately |
+| Directory access/authorization | Halt immediately |
+| Download/save failure, captured session | Retry download-only |
+| Download/save failure, pending new session | Retry full |
+| Generation/reply/prompt failure | Retry full |
+| Retry budget exhausted | Mark failed and advance, or halt at consecutive-failure limit |
 
-Special case:
-- watchdog timeout bypasses normal retry loop and advances to next task.
+Every retry recreates the tab at home while pending or the captured chat otherwise. A missing original reply in download-only mode is generation-classified and can fall back to a full retry.
 
-## Practical Effect
-
-- generation issues: usually retry full
-- download issues: retry download-only (with tab recreation) until retry budget is exhausted
-- every retry path recreates the tab first to avoid cross-task context contamination
-- hard infrastructure issues (folder/URL mismatch): stop run immediately
+Settings are read again for each attempt/wait. The running observation bar follows changed download timeout settings. Invalid Options inputs are highlighted and are not saved.

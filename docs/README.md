@@ -1,25 +1,21 @@
-# Technical Docs Index
+# Technical documentation
 
-This folder contains implementation-focused documentation.
+[OmniImageAutoGen architecture](ARCHITECTURE.md) introduces the four runtime components. The [dual-platform specification](specs/dual-platform.md) defines platform URLs, task validation, storage, adapter methods, message contracts and the download algorithm.
 
-## Start Here
+## Runtime behavior
 
-- `ARCHITECTURE.md`: high-level architecture overview and module map.
-- Operational baseline: use locked existing conversation with at least one generated image (avoid fresh `new conversation` threads for stable runs).
+- [Sidepanel lifecycle](flow-sidepanel-task-lifecycle.md): setup, queue creation, session capture, retries and cancellation.
+- [Content execution](flow-content-execution.md): one task through a Gemini or ChatGPT adapter.
+- [Background download pipeline](flow-background-download-pipeline.md): pre-click baseline, detection, stable decoding, transcoding and verified saving.
+- [State machines](state-machines.md): views, stages, task outcomes and arm transitions.
+- [Timeout and retry model](timeout-and-retry-model.md): budget ownership and retry decisions.
 
-## Detailed Business Logic
+## Contracts and maintenance
 
-- `flow-sidepanel-task-lifecycle.md`: run orchestration, retries, tab recreation, watchdog.
-- `flow-content-execution.md`: per-task content script flow on Gemini page.
-- `flow-background-download-pipeline.md`: download detection, stabilization, validation, rename/move.
-- `timeout-and-retry-model.md`: all timeout sources and retry behavior by layer.
-- `protocol-message-contracts.md`: runtime message protocol, payload schemas, and error semantics.
-- `state-machines.md`: sidepanel/content/background state transitions and stop conditions.
-- `config-and-storage-contracts.md`: storage keys, defaults, and cross-module ownership.
-- `selectors-and-dom-contracts.md`: critical DOM selectors and invariants used for Gemini interaction.
+- [Runtime messages](protocol-message-contracts.md): requests, responses and stale-message isolation.
+- [Configuration and storage](config-and-storage-contracts.md): settings defaults, migration and IDB compatibility.
+- [Selectors and DOM contracts](selectors-and-dom-contracts.md): scoped platform interaction and maintenance.
+- [Testing and quality](testing-and-quality.md): automated coverage, previews and manual acceptance.
+- [Troubleshooting](troubleshooting-playbook.md): readiness, generation, download and recovery checks.
 
-## Engineering Operations
-
-- `testing-and-quality.md`: current automated coverage and validation commands.
-- `troubleshooting-playbook.md`: practical diagnosis checklist for common stuck/failure scenarios.
-- release notes generator (stdout by default): `npm run release:notes -- --help`
+Use Bun for development commands. Release notes are available with `bun run release:notes -- --help`.

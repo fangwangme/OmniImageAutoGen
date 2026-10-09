@@ -75,7 +75,7 @@ async function waitGeneration(adapter: PlatformAdapter, userMessage: Element, ti
     } else textOnlySince = null;
     if (!state.busy && state.hasLoadedImage && state.downloadReady) return { kind: "image" };
     if (state.busy || state.complete || state.hasAnyImageNode) noProgressSince = now;
-    else if (now - noProgressSince >= noProgressLimit) throw new TaskError(`${t("content.error.timeoutDownloadButton")} (no progress for ${Math.round(noProgressLimit / 1000)}s)`, "generation");
+    else if (now - noProgressSince >= noProgressLimit) throw new TaskError(`${t("content.error.timeoutDownloadButton")} (${t("content.error.noProgress", { seconds: Math.round(noProgressLimit / 1000) })})`, "generation");
     await wait(Math.min(timing.poll, deadline - Date.now()), signal);
   }
   throw new TaskError(t("content.error.timeoutDownloadButton"), "generation");

@@ -1,63 +1,55 @@
-# Selectors and DOM Contracts
+# Selectors and DOM contracts
 
-This document lists critical Gemini DOM selectors used by automation logic.
+Selectors are centralized in `src/content/adapters/gemini.ts` and `chatgpt.ts`. Shared helpers in `dom.ts` implement visibility/enabled checks, normalized text, image loading, hover/click events, waits and Escape.
 
-## Input/Send/Stop
+## Gemini
 
-Defined in `src/content/pageSelectors.ts`.
+| Purpose | Primary contract |
+| --- | --- |
+| Composer | `.ql-editor.textarea[contenteditable="true"]`, with scoped editor/textbox fallbacks |
+| Page ready | Document complete, visible composer and chat container/main, no visible loading spinner |
+| Image mode | `button[aria-label="Upload & tools"]`; Create image `button[role="menuitemcheckbox"]` |
+| Selected image mode | Visible `button[aria-label="Deselect Images"]` or menu item's `aria-checked="true"` |
+| Ratio | `button[aria-label^="Aspect ratio"]`; option `[role="menuitemradio"][aria-label="<ratio>"]` |
+| Send/stop | `Send message` / `Stop response` aria labels, with existing button fallbacks |
+| User and reply | `user-query` and its closest `.conversation-container` |
+| Generation | Reply's `model-response [aria-busy="true"]`, footer complete, loaded generated image |
+| Download | Current container's `button[aria-label="Download full size image"]`, with specific download-component fallbacks |
 
-Input candidates:
-- `.ql-editor.textarea[contenteditable="true"]`
-- `.ql-editor[contenteditable="true"]`
-- `div[role="textbox"][contenteditable="true"]`
-- `rich-textarea .ql-editor[contenteditable="true"]`
+An already-selected image mode must not be clicked again. The ratio option is not assumed to be a button. Global historical `aria-busy` does not block page readiness.
 
-Send button candidates:
-- `button[aria-label="Send message"]`
-- `button.send-button`
-- `button.submit`
-- `button[mattooltip="Send message"]`
+History waiting gives an existing image priority: an unloaded last image keeps waiting even if warning text exists. A completed text-only warning can settle history when there is no image.
 
-Stop button candidates:
-- `button[aria-label="Stop responding"]`
-- `button[mattooltip="Stop responding"]`
+Download lookup remains within the bound conversation container. It hovers the image overlay and clicks the native download button once.
 
-## Conversation/Response Containers
+## ChatGPT
 
-Primary container selectors:
-- `.conversation-container`
-- `.response-container`
-- `model-response`
+| Purpose | Primary contract |
+| --- | --- |
+| Composer | `div.ProseMirror[contenteditable="true"]`, with composer textbox fallbacks |
+| Image mode | Tools `button[aria-label="Add files and more"]`; Create image `button[data-list-navigation-item]` |
+| Selected image mode | Composer's `[data-inline-selection-pill][data-system-hint-type="picture_v2"]` |
+| Send/stop | `button[aria-label="Send"]` / `button[aria-label="Stop"]`, with data-testid fallbacks |
+| User message | `[data-user-message-bubble]`, read using `innerText` |
+| Assistant markers | `h4[data-conversation-role="assistant"]`; blocks after the bound user and before the next user |
+| Completion | Last paired turn's `data-talvt-turn-state="complete"` |
+| Generated image | Paired blocks' `[data-testid="generated-image-preview"] img` |
+| Viewer | A `[role="dialog"]` titled **Image preview** |
+| Viewer download/close | That dialog's `button[aria-label="Download"]` / `button[aria-label="Close viewer"]` |
 
-Prompt anchor helpers:
-- `user-query`
-- rendered text matching `name: <filename>`
+Prompt insertion preserves the composer image pill. A paste event is preferred, with insertText fallback; selecting all composer contents would remove the pill. Image mode is checked for each task because it may not survive sending/reopening.
 
-## Image and Download Controls
+Generated images are identified within paired assistant blocks, not by their alt text. The last preview in those blocks opens the specifically titled dialog; unrelated dialogs are excluded.
 
-Image candidates:
-- `single-image img`
-- `generated-image img`
-- `img[src*="googleusercontent"]`
-- `img.loaded`
+## Cross-platform invariants
 
-Download button candidates:
-- `download-generated-image-button button`
-- `button[aria-label*="Download"]`
-- `button[mattooltip*="Download"]`
-- `button[data-test-id*="download"]`
+- Capture user-message element references before sending.
+- Confirm a new matching user message after the baseline; never click Send again after acknowledgment.
+- Bind the reply to the name anchor, and choose the last matching user message for download-only retry.
+- Loaded generated images have meaningful natural dimensions; unloaded nodes do not satisfy download readiness.
+- Arm the source baseline before clicking a native download once per attempt.
+- Hardcoded dynamic IDs, hash classes, blob URLs and absolute XPath are not selectors.
+- Warning patterns inspect reply text without including the user's prompt.
+- Missing image-mode controls warn and continue; missing bound download controls fail the task.
 
-## Contract Expectations
-
-- Last history image must be loaded before new prompt send gate passes.
-- Last-image detection ignores small/non-generated image noise (`<=100px`) to avoid false waits.
-- If the latest response matches built-in/custom warning patterns, warning gate takes precedence and history wait passes immediately.
-- Target response container should correspond to new prompt anchor when possible.
-- Download button lookup is scoped to target container first; global fallback second.
-
-## Maintenance Guidance
-
-When Gemini DOM changes:
-1. update selectors in `domHelpers.ts` / `pageSelectors.ts`
-2. keep fallback selector families broad but scoped
-3. verify with sidepanel logs + watchdog snapshot fields
+Site changes should be repaired within the relevant adapter, then checked with scoped event/verbose logs and a two-task manual run. Non-English site UI remains a manual compatibility check.

@@ -1,100 +1,49 @@
-# Sidepanel Task Lifecycle
+# Sidepanel task lifecycle
 
-This document describes the run orchestration behavior implemented by sidepanel modules.
+The store in `src/sidepanel/state.ts` supplies setup, running and finished views. `startRun.ts` prepares a run; `taskLifecycle.ts` schedules its serial attempts; `sessionCapture.ts` captures new-chat URLs.
 
-## Main Modules
+## Setup and Start
 
-- `src/sidepanel.ts`: wiring and composition.
-- `src/sidepanel/startRun.ts`: Start button pre-flight and queue initialization.
-- `src/sidepanel/taskLifecycle.ts`: core state machine.
-- `src/sidepanel/tabHelpers.ts`: tab load waiting and placeholder handling.
-- `src/sidepanel/runControls.ts`: stop/reset actions.
+Readiness requires a validated task file and granted source/output access. Existing mode also requires a chat URL for the selected platform. New mode does not require a chat URL.
 
-## Run State
+Start reads selected platform/session/settings and refreshes active-tab, folder and output state. Existing mode reuses a matching tab in the current window or opens the supplied URL. New mode opens a fresh platform home tab; Gemini keeps the active Gemini tab's account prefix.
 
-State is centralized in `TaskLifecycleState` (`src/sidepanel/taskLifecycle.ts`), including:
+After page load, readiness delay and existing-chat URL checking, output names are compared ignoring case against safe task names. An empty queue stays in setup with **All N images already saved**. A non-empty queue switches to running and starts session capture.
 
-- queue and current index
-- running flag
-- current/locked conversation URL
-- current tab id
-- retry counters
-- failure counters
-- next task mode (`full` / `download-only`)
+## Attempt state
 
-## Start Flow
+Each attempt stores task, mode, queue index, unique monotonic sequence, platform, chat URL/pending state, home URL and attempt number. Storage writes are serialized and checked against the current run.
 
-`startRun.ts` performs:
+The watchdog is armed per attempt using current generation/download settings. Content is injected with the expected sequence in its module URL. Async transitions check run identity/index/sequence after awaits, including tab creation and output post-checks.
 
-1. locked conversation URL validation
-2. operational precondition: locked URL should be an existing conversation that already has at least one generated image
-3. tab acquisition (reuse or create)
-4. optional lock URL reconciliation
-5. existing-file pre-scan (`LIST_ALL_FILES`)
-6. pending queue build
-7. state reset and timer start
+Stages are Open session, Image mode, Send prompt, Generate image, Download original and Convert & save. A new active stage completes the previous active stage. Reused/skipped states retain their labels. Task stage and log messages are filtered by task scope.
 
-Then `taskLifecycle.processNextTask()` is called.
+## New-chat capture
 
-Why avoid new conversation:
+For the run's current tab, a URL update matching the selected platform's conversation route sets the captured chat URL, clears pending state and stores the platform-specific session link with existing mode.
 
-- download-only retry depends on finding an existing response container and download button in history
-- history settle gate uses existing image load state to avoid race with unfinished rendering
-- in fresh conversation (no generated image yet), targeting is less stable and recovery path is weaker
+After the first non-skipped completion, a final tab lookup attempts capture again. If no specific chat URL exists, the run halts with a chat-link error. While capture is pending, download failures choose full retries; afterward they can retry download-only.
 
-## Task Processing
+## Completion and retry
 
-`processNextTask()` does:
+A skipped task records existing-output or warning outcome. A non-skipped task must pass platform-specific `CHECK_FILE_EXISTS` with a 10-second post-check budget before it counts as saved.
 
-1. check run complete
-2. set UI status/progress
-3. persist `currentTask` + `currentTaskMode` + `currentTaskIndex` + `currentTaskRunSeq`
-4. arm watchdog
-5. inject content module into target tab
+Successful/skipped completion resets consecutive failures and advances. Retry counts use `taskKey(platform,name)`. Normal errors use the unchanged retry policy:
 
-Content script then returns completion/error via runtime messages that carry `taskIndex` and `taskRunSeq`.
+- Session or directory errors halt immediately.
+- Download errors retry download-only when the chat is known.
+- Other errors retry the full task.
+- Exhausted retries mark failure, advance or halt at the configured consecutive-failure threshold.
+- Watchdog expiry marks failure and advances without normal retries.
 
-## Message Handling
+Every task transition/retry recreates the automation tab. Closing the last tab first creates a placeholder to preserve the window. The target is home while pending, otherwise the captured chat.
 
-`handlePanelMessage()` consumes:
+## Stop, Reset and finish
 
-- `TASK_COMPLETE`
-  - reject stale messages by `taskIndex` / `taskRunSeq`
-  - if `skipped=false`, verify output with `CHECK_FILE_EXISTS` before accepting completion
-  - verification has a hard timeout (`10s`); timeout is treated as `download` error
-  - if verification fails, convert to `download` error and route retry policy
-  - if verification passes, clear retry and advance queue
-- `TASK_ERROR`
-  - reject stale messages by `taskIndex` / `taskRunSeq`
-  - route to `handleTaskError()`
-- `UPDATE_STATUS`
-  - reject stale status updates by `taskIndex` / `taskRunSeq`
-  - update sidepanel status text
-- `PANEL_LOG`
-  - append timestamped log line
+Errors, watchdog expiry, Stop and Reset cancel background downloads and invalidate the stored task, causing content to abort. Late task messages cannot update a stopped or later run.
 
-## Error Handling and Retry
+Stop keeps results and presents stopped output. Hard-stop reasons appear in the halted finished view; directory errors offer permission recovery, and session errors offer **Open chat**. Normal completion retains the captured link for later runs. Output files are refreshed to calculate remaining tasks.
 
-`handleTaskError()` combines:
+Reset clears local storage and runtime queue/log state, cancels pending URL saves, and preserves IDB handles and images. External Options reset clears the panel without recursively clearing storage again.
 
-- error classification (`errorClassifier`)
-- retry decision (`retryPolicy`)
-- policy actions:
-  - stop locked-url errors immediately
-  - stop folder permission errors immediately
-  - retry download-only for download errors (always with tab recreation)
-  - retry full for generation errors (with tab recreation)
-  - fail-next/fail-stop when retry budget exhausted
-
-Watchdog timeout is treated as a dedicated fail-fast path and moves to next task.
-
-## Tab Recreation Strategy
-
-`recreateTab()`:
-
-1. close current tab safely (create placeholder if last tab in window)
-2. wait configured task interval
-3. open locked conversation URL in a fresh tab
-4. wait page load and readiness delay
-5. re-validate locked URL
-6. continue next task
+Finished views offer **Copy log**, **Back to setup** and rerunning missing outputs in the retained conversation.

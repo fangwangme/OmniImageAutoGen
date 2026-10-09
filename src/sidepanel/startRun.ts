@@ -29,7 +29,7 @@ export async function openSession(store: PanelStore, run: RunState, current: () 
   }
   const tab = existing?.id !== undefined ? await chrome.tabs.update(existing.id, { active: true }) : await chrome.tabs.create({ url: targetUrl, active: true });
   check();
-  if (tab.id === undefined) throw taskError("Could not create platform tab", "locked-url");
+  if (tab.id === undefined) throw taskError(createTranslator(store.state.language)("lifecycle.tabCreationFailed"), "locked-url");
   run.currentTabId = tab.id;
   await waitForPageLoad(tab.id, secondsSetting(settings.settings_pageLoadTimeout, 30) * 1000, chrome.tabs.get.bind(chrome.tabs), current);
   check();
