@@ -93,10 +93,12 @@ export function createGeminiAdapter(t: Translator, signal?: AbortSignal): Platfo
           const images = scope ? Array.from(scope.querySelectorAll<HTMLImageElement>(SELECTORS.image)) : [];
           const image = images.at(-1);
           const busy = !!scope?.querySelector(SELECTORS.busy) || !!stopButton();
+          const textOnly = !!scope && !busy && images.length === 0 && !downloadButton(scope);
           return {
             hasAnyImage: images.length > 0,
             lastImageLoaded: !!image && isImageLoaded(image) && image.naturalWidth > 100,
-            hasTextOnlyWarning: !!scope && !busy && images.length === 0 && !downloadButton(scope) && matchesWarningPattern(responseText(scope))
+            hasTextOnlyWarning: textOnly && matchesWarningPattern(responseText(scope)),
+            hasCompletedTextReply: textOnly && !!scope?.querySelector(SELECTORS.complete)
           };
         }
       });

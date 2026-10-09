@@ -2,7 +2,7 @@ import { evaluateHistoryImageWait } from "./historyWait.js";
 import { wait, assertNotAborted } from "./dom.js";
 import type { Translator } from "./adapters/types.js";
 
-type HistoryState = { hasAnyImage: boolean; lastImageLoaded: boolean; hasTextOnlyWarning: boolean };
+type HistoryState = { hasAnyImage: boolean; lastImageLoaded: boolean; hasTextOnlyWarning: boolean; hasCompletedTextReply: boolean };
 
 export async function waitForHistoryImagesToSettle(params: {
   stabilityTimeoutMs: number;

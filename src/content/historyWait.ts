@@ -1,16 +1,8 @@
 import { evaluateContentHistoryImageWait } from "../utils/contentHistoryWait.js";
 
-export const evaluateHistoryImageWait = ({
-  hasAnyImage,
-  lastImageLoaded,
-  hasTextOnlyWarning
-}: {
+export const evaluateHistoryImageWait = (params: {
   hasAnyImage: boolean;
   lastImageLoaded: boolean;
   hasTextOnlyWarning?: boolean;
-}) =>
-  evaluateContentHistoryImageWait({
-    hasAnyImage,
-    lastImageLoaded,
-    hasTextOnlyWarning
-  });
+  hasCompletedTextReply?: boolean;
+}) => evaluateContentHistoryImageWait(params);

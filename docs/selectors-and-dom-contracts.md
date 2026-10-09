@@ -18,7 +18,7 @@ Selectors are centralized in `src/content/adapters/gemini.ts` and `chatgpt.ts`. 
 
 An already-selected image mode must not be clicked again. The ratio option is not assumed to be a button. Global historical `aria-busy` does not block page readiness.
 
-History waiting gives an existing image priority: an unloaded last image keeps waiting even if warning text exists. A completed text-only warning can settle history when there is no image.
+History waiting gives an existing image priority: an unloaded last image keeps waiting even if warning text exists. When there is no image, a text-only reply settles history if it matches a warning pattern or its footer shows the reply is complete; otherwise a later task would wait for an image that never arrives.
 
 Download lookup remains within the bound conversation container. It hovers the image overlay and clicks the native download button once.
 
