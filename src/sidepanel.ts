@@ -23,6 +23,11 @@ let sessionSaveTimer: ReturnType<typeof setTimeout> | undefined;
 let resetting = false;
 let lastLogEntry: LogEntry | undefined;
 
+function cancelSessionSave() {
+  if(sessionSaveTimer) clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = undefined;
+}
+
 function render() {
   const active = document.activeElement;
   const sessionFocused = active instanceof HTMLInputElement && active.id === 'sessionUrl';
@@ -55,8 +60,7 @@ store.subscribe(render);
 const persist = async (items: Record<string, unknown>) => { if(!preview) await chrome.storage.local.set(items); };
 const refresh = async () => { if(!preview) await refreshSetup(store); else store.render(); };
 async function flushSession() {
-  if(sessionSaveTimer) clearTimeout(sessionSaveTimer);
-  sessionSaveTimer = undefined;
+  cancelSessionSave();
   await persist({ [`sessionUrl_${state.platform}`]:state.sessionUrls[state.platform],ui_platform:state.platform,ui_sessionMode:state.sessionMode });
 }
 async function copy(text: string, button: HTMLElement) {
@@ -108,6 +112,7 @@ async function handleAction(button: HTMLElement) {
       await flushSession(); if(runtime) await runtime.start(); else {applyPreviewState(store,'running');store.render();} break;
     case 'stop': if(runtime) await runtime.stop(); else {state.run.isRunning=false;state.run.outcome='stopped';state.run.endTime=Date.now();state.view='finished';store.render();} break;
     case 'reset':
+      cancelSessionSave();
       if(runtime) { resetting=true;try{await runtime.reset();}finally{resetting=false;} }
       else {applyPreviewState(store,'setup');state.view='setup';store.render();} break;
     case 'toggle-log': state.logCollapsed=!state.logCollapsed;await persist({logCollapsed:state.logCollapsed});store.render();break;
@@ -152,7 +157,7 @@ async function init() {
     if(area!=='local') return;
     const removed=(key:string)=>changes[key]?.oldValue!==undefined && changes[key]?.newValue===undefined;
     const externalClear=removed('currentTaskRunSeq') || ((state.run.isRunning||state.starting)&&removed('loadedTasks')) || (removed('loadedTasks') && ['ui_platform','uiLanguage','settings_aspectRatio'].some(removed));
-    if(externalClear&&!resetting) {resetting=true;void runtime!.reset({clearStorage:false}).finally(()=>{resetting=false;});return;}
+    if(externalClear&&!resetting) {cancelSessionSave();resetting=true;void runtime!.reset({clearStorage:false}).finally(()=>{resetting=false;});return;}
     if(changes.uiLanguage) state.language=normalizeLanguage(changes.uiLanguage.newValue);
     if(changes.settings_aspectRatio) state.aspectRatio=(['1:1','3:4','4:3','9:16','16:9'].includes(changes.settings_aspectRatio.newValue)?changes.settings_aspectRatio.newValue:'16:9') as AspectRatio;
     if(changes.settings_downloadTimeout) state.run.downloadTimeout=Number(changes.settings_downloadTimeout.newValue)||120;
@@ -164,7 +169,7 @@ async function init() {
   };
   chrome.storage.onChanged.addListener(onStorage);
   window.addEventListener('unload',()=>{
-    if(sessionSaveTimer) clearTimeout(sessionSaveTimer);
+    cancelSessionSave();
     chrome.runtime.onMessage.removeListener(onMessage);chrome.tabs.onActivated.removeListener(activeChanged);chrome.tabs.onUpdated.removeListener(onUpdated);chrome.storage.onChanged.removeListener(onStorage);runtime!.dispose();
   },{once:true});
   store.render();

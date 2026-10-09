@@ -4,9 +4,10 @@ import type { PanelStore } from "./state.js";
 const loadSequences = new WeakMap<PanelStore, number>();
 export async function loadTasksFile(store: PanelStore, file: File) {
   if (store.state.run.isRunning || store.state.starting) return;
+  const capturedRun = store.state.run;
   const sequence = (loadSequences.get(store) || 0) + 1;
   loadSequences.set(store, sequence);
-  const current = () => loadSequences.get(store) === sequence && !store.state.run.isRunning && !store.state.starting;
+  const current = () => loadSequences.get(store) === sequence && store.state.run === capturedRun && !store.state.run.isRunning && !store.state.starting;
   const text = await file.text();
   if (!current()) return;
   let raw: unknown;
