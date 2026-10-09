@@ -1,6 +1,6 @@
 # Dual-platform image generation specification
 
-This contract defines OmniImageAutoGen 6.0.0: one platform per run, serial tasks in one session, scoped native downloads and verified output under platform subdirectories.
+This contract defines OmniImageAutoGen 0.1.0: one platform per run, serial tasks in one session, scoped native downloads and verified output under platform subdirectories.
 
 ## 1. Scope and invariants
 

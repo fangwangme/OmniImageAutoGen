@@ -25,7 +25,7 @@ Keep the intentional regression out of commits. Evidence should quote only relev
 
 ## Build checks
 
-Verify the built manifest has both platform host permissions and web-accessible matches, the OmniImageAutoGen name and version 6.0.0.
+Verify the built manifest has both platform host permissions and web-accessible matches, the OmniImageAutoGen name and version 0.1.0.
 
 ```bash
 jq '.host_permissions, .web_accessible_resources[0].matches, .name, .version' .local/dist/manifest.json
