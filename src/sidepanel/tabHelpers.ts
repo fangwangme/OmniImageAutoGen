@@ -32,7 +32,8 @@ export async function waitForPageLoad(tabId: number, timeoutMs: number, tabsGet:
       catch (error) { done(error instanceof Error ? error : new Error(String(error))); }
       finally { checking = false; }
     }, 250);
-    const timer = setTimeout(() => done(new Error("Page load timeout")), timeoutMs);
+    // A slow page is not a failure: the session URL check and the content script's input wait decide readiness.
+    const timer = setTimeout(() => done(), timeoutMs);
     chrome.tabs.onUpdated.addListener(listener);
   });
 }

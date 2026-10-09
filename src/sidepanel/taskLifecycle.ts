@@ -87,7 +87,8 @@ export function createTaskLifecycle(store: PanelStore) {
     } catch (error) {
       if (!guard()) return;
       handlingSequence = run.activeTaskRunSeq;
-      await handleTaskError(run, run.activeTaskRunSeq, error instanceof Error ? error.message : String(error), (error as { errorType?: TaskErrorType })?.errorType || "locked-url");
+      // Only an explicit session mismatch halts the run; other tab errors are retried like any task failure.
+      await handleTaskError(run, run.activeTaskRunSeq, error instanceof Error ? error.message : String(error), (error as { errorType?: TaskErrorType })?.errorType || "generation");
     }
   }
   async function advance(run: RunState) {

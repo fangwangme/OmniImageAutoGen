@@ -43,6 +43,6 @@ Default maximum retries is 3, meaning up to 4 attempts. Default consecutive-fail
 | Generation/reply/prompt failure | Retry full |
 | Retry budget exhausted | Mark failed and advance, or halt at consecutive-failure limit |
 
-Every retry recreates the tab at home while pending or the captured chat otherwise. A missing original reply in download-only mode is generation-classified and can fall back to a full retry.
+Every retry recreates the tab at home while pending or the captured chat otherwise. A missing original reply in download-only mode is generation-classified and can fall back to a full retry. A slow page load does not fail the tab: the run continues and the session URL check plus the content input wait decide readiness. Only a session URL mismatch halts the run.
 
 Settings are read again for each attempt/wait. The running observation bar follows changed download timeout settings. Invalid Options inputs are highlighted and are not saved.
