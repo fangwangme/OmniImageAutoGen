@@ -114,6 +114,7 @@ async function savePatterns() {
   await storageSet({[CUSTOM_WARNING_PATTERNS_STORAGE_KEY]:sanitizeCustomWarningPatterns(patterns.map(value=>value.trim()).filter(Boolean))});setSaveStatus();
 }
 async function handleAction(button:HTMLElement) {
+  if(resetting)return;
   const value=button.dataset.value;
   switch(button.dataset.action){
     case 'folder': {
@@ -140,8 +141,13 @@ async function handleAction(button:HTMLElement) {
       if(resetting)return;
       resetting=true;
       if(resetTimer)clearTimeout(resetTimer);if(timingTimer)clearTimeout(timingTimer);if(patternTimer)clearTimeout(patternTimer);
-      if(!preview){await pendingWrites;await chrome.storage.local.clear();await chrome.runtime.sendMessage({action:'RESET_STATE'});}
-      location.reload();break;
+      try {
+        if(!preview){await pendingWrites;await chrome.storage.local.clear();await chrome.runtime.sendMessage({action:'RESET_STATE'});}
+        location.reload();
+      } catch(error) {
+        resetting=false;render();throw error;
+      }
+      break;
   }
 }
 root.addEventListener('click',event=>{
@@ -150,11 +156,13 @@ root.addEventListener('click',event=>{
   void handleAction(button).catch(()=>setSaveStatus(true));
 });
 root.addEventListener('input',event=>{
+  if(resetting)return;
   const input=event.target;if(!(input instanceof HTMLInputElement))return;
   if(input.dataset.timing){const key=input.dataset.timing as TimingKey;timingDrafts[key]=input.value;input.setAttribute('aria-invalid',String(!validTiming(key)));updateWatchdog();if(timingTimer)clearTimeout(timingTimer);timingTimer=setTimeout(()=>{void saveTiming().catch(()=>setSaveStatus(true));},400);}
   if(input.dataset.pattern!==undefined){patterns[Number(input.dataset.pattern)]=input.value;validatePatterns();if(patternTimer)clearTimeout(patternTimer);patternTimer=setTimeout(()=>{void savePatterns().catch(()=>setSaveStatus(true));},250);}
 });
 root.addEventListener('change',event=>{
+  if(resetting)return;
   const input=event.target;if(!(input instanceof HTMLSelectElement)||input.id!=='languageSelect')return;
   language=normalizeLanguage(input.value);render();
   void queueWrite(()=>setStoredLanguage(language)).then(()=>setSaveStatus()).catch(()=>setSaveStatus(true));
