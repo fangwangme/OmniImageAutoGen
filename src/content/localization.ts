@@ -69,4 +69,3 @@ export const getStoredLanguage = async (): Promise<Language> => {
   const stored = await chrome.storage.local.get([LANGUAGE_STORAGE_KEY]);
   return normalizeLanguage(stored[LANGUAGE_STORAGE_KEY]);
 };
-export const defaultContentTranslator = () => createTranslator(DEFAULT_LANGUAGE);

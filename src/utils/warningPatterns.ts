@@ -21,7 +21,7 @@ const parseRegexLiteral = (value: string): RegExp | null => {
   return new RegExp(body, flags);
 };
 
-export const normalizeWarningPatternInput = (value: unknown) =>
+const normalizeWarningPatternInput = (value: unknown) =>
   typeof value === "string" ? value.trim() : "";
 
 export const sanitizeCustomWarningPatterns = (

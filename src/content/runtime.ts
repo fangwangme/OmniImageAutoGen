@@ -1,12 +1,12 @@
 import type { AspectRatio, PlatformId, StageId, StageStatus, TaskItem } from "../types.js";
 import { assertNotAborted } from "./dom.js";
 export { toSafeTaskFilename } from "../utils/taskQueue.js";
-export { isFolderAuthErrorMessage, resolveTaskErrorType } from "../utils/errorClassifier.js";
+export { resolveTaskErrorType } from "../utils/errorClassifier.js";
 
 export type TaskErrorType = "generation" | "download" | "folder" | "locked-url";
-export type TaskMode = "full" | "download-only";
-export type TaskScopeIds = { taskIndex?: number; taskRunSeq?: number };
-export type ContentSettings = {
+type TaskMode = "full" | "download-only";
+type TaskScopeIds = { taskIndex?: number; taskRunSeq?: number };
+type ContentSettings = {
   settings_generationTimeout?: number;
   settings_downloadTimeout?: number;
   settings_pageLoadTimeout?: number;

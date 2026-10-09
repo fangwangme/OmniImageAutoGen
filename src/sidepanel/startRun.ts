@@ -8,7 +8,7 @@ import { refreshSetup } from "./initState.js";
 import { ensureLockedConversationTab, waitForPageLoad } from "./tabHelpers.js";
 
 export const secondsSetting = (value: unknown, fallback: number) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
-export const stepDelaySeconds = (value: unknown) => {
+const stepDelaySeconds = (value: unknown) => {
   const seconds = secondsSetting(value, 1);
   return seconds > 60 ? seconds / 1000 : seconds;
 };
