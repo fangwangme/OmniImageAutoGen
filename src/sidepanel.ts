@@ -127,6 +127,7 @@ async function handleAction(button: HTMLElement) {
     case 'rerun':
       if(!state.run.sessionUrl) {state.view='setup';await refresh();break;}
       state.sessionMode='existing';state.sessionUrls[state.platform]=state.run.sessionUrl;await flushSession();
+      await refresh();
       if(runtime) await runtime.start();else{applyPreviewState(store,'running');store.render();}break;
   }
 }

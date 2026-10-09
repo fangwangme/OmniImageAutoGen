@@ -9,16 +9,16 @@ const SELECTORS = {
   composer: ['.ql-editor.textarea[contenteditable="true"]', '.ql-editor[contenteditable="true"]', 'rich-textarea .ql-editor[contenteditable="true"]', 'div[role="textbox"][contenteditable="true"]'],
   history: ['#chat-history', '.chat-history-scroll-container', 'main'],
   loader: ['.loading-spinner', '.skeleton-loader', '.mat-progress-spinner'],
-  tools: 'button[aria-label="Upload & tools"]',
+  tools: ['button[aria-label="Upload & tools"]', 'button[aria-label*="Upload"]', 'button[aria-label*="工具"]'],
   imageItem: 'button[role="menuitemcheckbox"]',
-  imageMode: 'button[aria-label="Deselect Images"]',
-  ratio: 'button[aria-label^="Aspect ratio"]',
-  send: ['button[aria-label="Send message"]', 'button.send-button', 'button[mattooltip="Send message"]'],
-  stop: ['button[aria-label="Stop response"]', 'button[aria-label="Stop responding"]', 'button[mattooltip="Stop responding"]'],
+  imageMode: ['button[aria-label="Deselect Images"]', 'button[aria-label*="Deselect Images"]', 'button[aria-label*="取消选择图片"]'],
+  ratio: ['button[aria-label^="Aspect ratio"]', 'button[aria-label*="Aspect ratio"]', 'button[aria-label*="宽高比"]'],
+  send: ['button[aria-label="Send message"]', 'button[aria-label="发送消息"]', 'button.send-button', 'button[mattooltip="Send message"]'],
+  stop: ['button[aria-label="Stop response"]', 'button[aria-label="Stop responding"]', 'button[aria-label="停止响应"]', 'button[mattooltip="Stop responding"]'],
   user: 'user-query',
   conversation: '.conversation-container',
   image: 'generated-image img, single-image img',
-  download: ['button[aria-label="Download full size image"]', 'download-generated-image-button button', 'button[data-test-id="download-generated-image-button"]'],
+  download: ['button[aria-label="Download full size image"]', 'button[aria-label*="下载全尺寸"]', 'download-generated-image-button button', 'button[data-test-id="download-generated-image-button"]'],
   complete: '.response-footer.complete',
   busy: 'model-response [aria-busy="true"]'
 } as const;
@@ -26,8 +26,8 @@ const SELECTORS = {
 export function createGeminiAdapter(t: Translator, signal?: AbortSignal): PlatformAdapter {
   const composer = () => firstVisible<HTMLElement>(SELECTORS.composer);
   const stopButton = () => firstVisible<HTMLButtonElement>(SELECTORS.stop);
-  const imageMode = () => firstVisible<HTMLElement>([SELECTORS.imageMode]);
-  const imageItem = () => Array.from(document.querySelectorAll<HTMLElement>(SELECTORS.imageItem)).find(element => isVisible(element) && normalizeText(element.innerText).includes("Create image")) || null;
+  const imageMode = () => firstVisible<HTMLElement>(SELECTORS.imageMode);
+  const imageItem = () => Array.from(document.querySelectorAll<HTMLElement>(SELECTORS.imageItem)).find(element => isVisible(element) && (normalizeText(element.innerText).includes("Create image") || normalizeText(element.innerText).includes("创建图片"))) || null;
   const downloadButton = (scope: Element | null): HTMLButtonElement | null => {
     if (!scope) return null;
     for (const selector of SELECTORS.download) {
@@ -110,7 +110,7 @@ export function createGeminiAdapter(t: Translator, signal?: AbortSignal): Platfo
         return "ok";
       }
       try {
-        const tools = firstVisible<HTMLElement>([SELECTORS.tools]);
+        const tools = firstVisible<HTMLElement>(SELECTORS.tools);
         if (!tools) return "not-found";
         clickLikeUser(tools, signal);
         await waitFor(() => !!imageItem(), Math.max(2000, stepDelayMs * 3), 100, "Image mode menu not found", signal);
@@ -131,13 +131,17 @@ export function createGeminiAdapter(t: Translator, signal?: AbortSignal): Platfo
     },
     async ensureAspectRatio(ratio: AspectRatio) {
       assertNotAborted(signal);
-      const getButton = () => firstVisible<HTMLElement>([SELECTORS.ratio]);
-      const selectedRatio = () => getButton()?.getAttribute("aria-label")?.split(", ")[1];
+      const getButton = () => firstVisible<HTMLElement>(SELECTORS.ratio);
+      const selectedRatio = () => {
+        const label = getButton()?.getAttribute("aria-label") || "";
+        const match = label.match(/\b(1:1|3:4|4:3|9:16|16:9)\b/);
+        return match ? match[1] : undefined;
+      };
       if (!getButton()) return "not-found";
       if (selectedRatio() === ratio) return "ok";
       try {
         clickLikeUser(getButton()!, signal);
-        const getOption = () => firstVisible<HTMLElement>([`[role="menuitemradio"][aria-label="${ratio}"]`]);
+        const getOption = () => firstVisible<HTMLElement>([`[role="menuitemradio"][aria-label="${ratio}"]`, `[role="menuitemradio"][aria-label*="${ratio}"]`]);
         await waitFor(() => !!getOption(), 2000, 100, "Aspect ratio option not found", signal);
         clickLikeUser(getOption()!, signal);
         await waitFor(() => selectedRatio() === ratio, 2000, 100, "Aspect ratio not selected", signal);

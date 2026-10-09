@@ -4,19 +4,19 @@ import { emptyReplyState, type PlatformAdapter, type Translator } from "./types.
 
 const SELECTORS = {
   composer: ['div.ProseMirror[contenteditable="true"]', 'div[role="textbox"][contenteditable="true"][data-composer-markdown]', 'div[role="textbox"][contenteditable="true"]'],
-  tools: 'button[aria-label="Add files and more"]',
+  tools: ['button[aria-label="Add files and more"]', 'button[aria-label*="Add files"]', 'button[aria-label*="添加文件"]'],
   imageItem: 'button[data-list-navigation-item]',
   imageMode: '[data-inline-selection-pill][data-system-hint-type="picture_v2"]',
-  send: ['button[aria-label="Send"]', 'button[data-testid="send-button"]'],
-  stop: ['button[aria-label="Stop"]', 'button[data-testid="stop-button"]'],
+  send: ['button[aria-label="Send"]', 'button[aria-label="发送"]', 'button[data-testid="send-button"]'],
+  stop: ['button[aria-label="Stop"]', 'button[aria-label="停止"]', 'button[data-testid="stop-button"]'],
   user: '[data-user-message-bubble]',
   assistant: 'h4[data-conversation-role="assistant"]',
   turn: '[data-talvt-turn-state]',
   preview: '[data-testid="generated-image-preview"]',
   image: '[data-testid="generated-image-preview"] img',
   dialog: '[role="dialog"]',
-  viewerDownload: 'button[aria-label="Download"]',
-  viewerClose: 'button[aria-label="Close viewer"]'
+  viewerDownload: 'button[aria-label="Download"], button[aria-label*="Download"], button[aria-label="下载"], button[aria-label*="下载"]',
+  viewerClose: 'button[aria-label="Close viewer"], button[aria-label*="Close viewer"], button[aria-label="关闭"], button[aria-label*="关闭"]'
 } as const;
 
 type AssistantReply = { block: HTMLElement; turn: Element | null };
@@ -40,12 +40,16 @@ export function createChatGPTAdapter(t: Translator, signal?: AbortSignal): Platf
     return replies;
   };
   const viewer = (): HTMLElement | null => {
+    const isImagePreview = (text: string) => {
+      const n = normalizeText(text);
+      return n === "Image preview" || n === "图片预览" || n.includes("Image preview") || n.includes("图片预览");
+    };
     for (const dialog of document.querySelectorAll<HTMLElement>(SELECTORS.dialog)) {
       if (!isVisible(dialog)) continue;
       const labelIds = (dialog.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean);
       const label = labelIds.map(id => document.getElementById(id)?.innerText || "").join(" ");
       const headings = Array.from(dialog.querySelectorAll<HTMLElement>("h2"));
-      if (normalizeText(label) === "Image preview" || headings.some(heading => normalizeText(heading.innerText) === "Image preview")) return dialog;
+      if (isImagePreview(label) || headings.some(heading => isImagePreview(heading.innerText))) return dialog;
     }
     return null;
   };
@@ -78,10 +82,10 @@ export function createChatGPTAdapter(t: Translator, signal?: AbortSignal): Platf
       imageModeSelected = !!pill();
       if (imageModeSelected) return "ok";
       try {
-        const tools = firstVisible<HTMLElement>([SELECTORS.tools]);
+        const tools = firstVisible<HTMLElement>(SELECTORS.tools);
         if (!tools) return "not-found";
         clickLikeUser(tools, signal);
-        const menuItem = () => Array.from(document.querySelectorAll<HTMLElement>(SELECTORS.imageItem)).find(element => isVisible(element) && normalizeText(element.innerText).includes("Create image")) || null;
+        const menuItem = () => Array.from(document.querySelectorAll<HTMLElement>(SELECTORS.imageItem)).find(element => isVisible(element) && (normalizeText(element.innerText).includes("Create image") || normalizeText(element.innerText).includes("创建图片"))) || null;
         await waitFor(() => !!menuItem(), 2000, 100, "Image mode menu not found", signal);
         clickLikeUser(menuItem()!, signal);
         await waitFor(() => !!pill(), 3000, 100, "Image mode not selected", signal);
