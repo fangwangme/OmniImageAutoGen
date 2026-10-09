@@ -83,33 +83,54 @@ Output is `<output handle>/<platform>/<safe filename>`. UI displays `handle.name
 
 ## 5. Storage and migration
 
-### Local keys
+### Local storage keys
 
-| Keys | Type/default |
-| --- | --- |
-| `uiLanguage`, `logCollapsed` | `en | zh`; boolean default true |
-| `loadedTasks` | Validated TaskItem[] |
-| `loadedTasksRaw`, `loadedTasksFileName` | Raw JSON array; string |
-| `ui_platform`, `ui_sessionMode` | PlatformId default Gemini; SessionMode default new |
-| `sessionUrl_chatgpt`, `sessionUrl_gemini` | Per-platform input/captured URLs |
-| `settings_aspectRatio` | AspectRatio default 16:9 |
-| `custom_warning_patterns` | string[], maximum 50 |
-| `sourceSubfolder`, `outputSubfolder` | Cached directory names |
-| `currentTask`, `currentTaskMode`, `currentTaskIndex`, `currentTaskRunSeq` | Current task, full/download-only mode and scoped index/sequence |
-| `currentTaskPlatform`, `currentTaskAttempt` | PlatformId; attempt starting at 1 |
-| `currentSessionUrl`, `currentSessionPending`, `currentHomeUrl` | Captured URL or empty; pending boolean; home URL |
+| Key | Type/default | Purpose |
+| --- | --- | --- |
+| `uiLanguage` | `en` or `zh`; default `en` | Interface language for panel and options |
+| `logCollapsed` | boolean; default true | Setup view log panel visibility |
+| `loadedTasksRaw` | raw JSON array | Raw tasks from loaded file |
+| `loadedTasks` | validated `{name,prompt}[]` | Validated task array; extra fields stripped |
+| `loadedTasksFileName` | string | Name of the loaded JSON file |
+| `ui_platform` | `chatgpt` or `gemini`; default `gemini` | Currently selected platform |
+| `ui_sessionMode` | `new` or `existing`; default `new` | Selected session mode |
+| `sessionUrl_chatgpt`, `sessionUrl_gemini` | string | Per-platform chat URL (manual or captured) |
+| `settings_aspectRatio` | `1:1`, `3:4`, `4:3`, `9:16`, `16:9`; default `16:9` | Gemini page ratio; ChatGPT uses prompt |
+| `sourceSubfolder`, `outputSubfolder` | string | Cached directory name (`handle.name`) |
+| `custom_warning_patterns` | string[]; default []; max 50 | Custom reply warning patterns |
+| `currentTask` | TaskItem or null | Active task item |
+| `currentTaskMode` | `full` or `download-only` | Attempt mode |
+| `currentTaskIndex` | number | Queue index of current task |
+| `currentTaskRunSeq` | number | Monotonic attempt sequence identifier |
+| `currentTaskPlatform` | PlatformId | Platform of active task |
+| `currentSessionUrl` | string | Locked chat URL (empty while pending) |
+| `currentSessionPending` | boolean | Whether new session link is awaiting capture |
+| `currentHomeUrl` | string | Home URL opened for new session |
+| `currentTaskAttempt` | number; starting at 1 | Attempt counter for current task |
 
-Existing numeric keys/defaults remain `settings_generationTimeout=120`, `settings_downloadTimeout=120`, `settings_pageLoadTimeout=30`, `settings_inputTimeout=5`, `settings_stepDelay=1`, `settings_taskInterval=5`, `settings_pollInterval=1`, `settings_maxRetries=3`, `settings_maxConsecutiveFailures=5`.
+### Timing and retry defaults
 
-Legacy polling fallback reads remain supported. Options removes the legacy polling keys and obsolete detect/stability timeout keys on timing save. See [complete key list](../config-and-storage-contracts.md).
+All timing values are seconds; retry/failure values are counts.
+
+| Key | Default | Purpose |
+| --- | ---: | --- |
+| `settings_generationTimeout` | 120 | Maximum wait for generated image to appear |
+| `settings_downloadTimeout` | 120 | Maximum wait from download click to verified save |
+| `settings_pageLoadTimeout` | 30 | Wait for chat page and history to settle |
+| `settings_inputTimeout` | 5 | Wait for composer prompt box to be ready |
+| `settings_stepDelay` | 1 | Pause between page actions |
+| `settings_taskInterval` | 5 | Pause between consecutive tasks |
+| `settings_pollInterval` | 1 | Polling interval for readiness and status checks |
+| `settings_maxRetries` | 3 | Retries per image before marking as failed |
+| `settings_maxConsecutiveFailures` | 5 | Consecutive failures before stopping (0 = never stop) |
 
 ### Migration and directories
 
 If `lockedConversationUrl` exists and is a valid Gemini chat, migration sets Gemini/existing mode and `sessionUrl_gemini`, then removes the old key. If a new Gemini session key already exists, it is not overwritten and only the old key is removed. Invalid old values are only removed; absence is a no-op.
 
-IDB is `GeminiAutoGenDB`, version 4, store `handles`, keys `sourceHandle/outputHandle`. Reset does not delete these handles or output files.
+IndexedDB database is `GeminiAutoGenDB`, version 4, object store `handles`, keys `sourceHandle` and `outputHandle`. Reset preserves these handles and existing output files. Status queries call `queryPermission({mode:"readwrite"})` without prompting; user-initiated **Allow again** requests access.
 
-## 6. Platform adapter interface
+## 6. Platform adapter interface and DOM selectors
 
 ```ts
 interface PlatformAdapter {
@@ -143,9 +164,45 @@ type ReplyState = {
 };
 ```
 
-Composer/send/download methods operate on visible/enabled controls. User text uses `innerText`; ChatGPT requires it for multiline anchors. Reply text excludes user prompt text. Anchor recovery chooses the last matching user message.
+### DOM selector contracts
 
-Gemini prepares the page ratio and downloads within the bound conversation. ChatGPT preserves its image pill while writing, pairs assistant blocks by DOM order, opens a bound generated-image preview and locates the dialog titled Image preview. Each attempt clicks one native download after ARM acknowledgment.
+#### Gemini
+
+| Purpose | Primary contract |
+| --- | --- |
+| Composer | `.ql-editor.textarea[contenteditable="true"]`, with scoped editor/textbox fallbacks |
+| Page ready | Document complete, visible composer and chat container/main, no visible loading spinner |
+| Image mode | `button[aria-label="Upload & tools"]` (with localized `上传和工具` / `工具` fallbacks); Create image `button[role="menuitemcheckbox"]` (`Create images` / `创建图片` / `生成图片`) |
+| Selected image mode | Visible `button[aria-label="Deselect Images"]` or menu item's `aria-checked="true"` |
+| Ratio | `button[aria-label^="Aspect ratio"]` / `button[aria-label^="宽高比"]`; option `[role="menuitemradio"]` matching ratio via regex `/\b(1:1|3:4|4:3|9:16|16:9)\b/` |
+| Send/stop | `Send message` / `Stop response` aria labels (with localized `发送消息` / `停止回答` fallbacks), with existing button fallbacks |
+| User and reply | `user-query` and its closest `.conversation-container` |
+| Generation | Reply's `model-response [aria-busy="true"]`, footer complete, loaded generated image |
+| Download | Current container's `button[aria-label="Download full size image"]` (with `下载全尺寸图片` / `下载原图` fallbacks), with specific download-component fallbacks |
+
+#### ChatGPT
+
+| Purpose | Primary contract |
+| --- | --- |
+| Composer | `div.ProseMirror[contenteditable="true"]`, with composer textbox fallbacks |
+| Image mode | Tools `button[aria-label="Add files and more"]` (with localized `添加文件等内容` / `附件` fallbacks); Create image `button[data-list-navigation-item]` (`Create image` / `创建图片`) |
+| Selected image mode | Composer's `[data-inline-selection-pill][data-system-hint-type="picture_v2"]` |
+| Send/stop | `button[aria-label="Send prompt"]` / `button[aria-label="Send"]` (localized `发送提示` / `发送`); stop `button[aria-label="Stop streaming"]` / `button[aria-label="Stop"]` (localized `停止`) |
+| User message | `[data-user-message-bubble]`, read using `innerText` |
+| Assistant markers | `h4[data-conversation-role="assistant"]`; blocks after the bound user and before the next user |
+| Completion | Last paired turn's `data-talvt-turn-state="complete"` |
+| Generated image | Paired blocks' `[data-testid="generated-image-preview"] img` |
+| Viewer | A `[role="dialog"]` titled **Image preview** or **图片预览** |
+| Viewer download/close | That dialog's `button[aria-label="Download"]` / `button[aria-label="下载"]` and `button[aria-label="Close"]` / `button[aria-label="关闭"]` / `button[aria-label="Close viewer"]` |
+
+### Interaction invariants
+
+- Capture user-message element references before sending; never click Send again after acknowledgment.
+- Bind the reply to the name anchor, and choose the last matching user message for download-only retry.
+- ChatGPT prompt insertion preserves the composer image pill using paste events with insertText fallback.
+- Loaded generated images have positive natural dimensions; unloaded nodes do not satisfy download readiness.
+- Arm the source baseline before clicking a native download once per attempt.
+- Adapters include bilingual English and Chinese selector fallbacks for primary buttons and dialogs.
 
 ## 7. Runtime messages
 
@@ -189,7 +246,7 @@ An active arm contains id, platform, targetFilename, task scope, baseline image-
 
 The deadline is arm time plus download timeout. Poll using current unified/legacy fallback interval:
 
-1. Check cancellation and call an extension API each round for service-worker activity.
+1. Check cancellation and call `chrome.runtime.getPlatformInfo()` each round for service-worker activity.
 2. Read eligible top-level image entries and select a filename outside baseline with `lastModified >= armedAt - 2000`.
 3. Choose maximum lastModified, then maximum filename as tie-breaker; no candidate means continue.
 4. Report save active. Require three equal positive file-size readings, within the same deadline.
@@ -207,26 +264,55 @@ Timeout returns download error. Folder-auth exceptions return folder error; othe
 
 ## 9. UI and runtime state
 
-```text
-setup -> running -> finished
-  ^          |          |
-  +----------+----------+  Reset / Back to setup
+```mermaid
+stateDiagram-v2
+  [*] --> setup
+  setup --> running: Start passes readiness and has queued tasks
+  setup --> setup: Invalid setup or all outputs present
+  running --> finished: Queue completed
+  running --> finished: Stop or hard halt
+  finished --> setup: Back to setup
+  finished --> running: Run remaining with retained chat
+  running --> setup: Reset
+  finished --> setup: Reset
 ```
 
-Setup readiness issues have fixed order `session,prompts,source,output`:
+### Setup readiness
 
-- Session: existing mode and invalid session URL. New mode ignores it.
-- Prompts: missing file, fatal parse/shape, any item issue or no valid tasks.
-- Source/output: state is not granted.
+Readiness issues have fixed priority order: `session`, `prompts`, `source`, `output`:
+
+- **session**: existing mode and invalid session URL (new mode ignores URL).
+- **prompts**: missing file, fatal parse/shape error, any item issue or empty task queue.
+- **source** / **output**: permission state is not `granted`.
 
 Start opens/reuses the selected session, filters existing files and stays in setup if nothing remains. A new-session URL update captures the platform chat and persists existing mode for the next run. The first non-skipped completion retries capture once via tab lookup; failure halts.
 
-Run state retains platform/session, queue/index, scoped sequence, attempt mode, stage timestamps, outcome, per-task results and retry/failure counters. Stages update only for current scope. Download-only reuses earlier stages. Logs store at most 2,000 entries; visible entries exclude verbose diagnostics, while copying includes them.
+### Retry policy
 
-Completion requires output existence post-check. Download errors retry download-only after capture and full while pending. Folder/session errors halt; exhausted retries can hit consecutive-failure stop. Watchdog budgets are generation+download+15s for full and download+15s for download-only; watchdog failure advances without normal retries.
+| Error condition | Recovery decision |
+| --- | --- |
+| Session URL mismatch (`locked-url`) | Halt immediately |
+| Folder authorization error (`folder`) | Halt immediately |
+| Download/save error with captured session | Retry download-only (reuse reply) |
+| Download/save error with pending session | Retry full task |
+| Generation/prompt failure | Retry full task |
+| Retries exhausted, within failure cap | Mark failed and advance to next task |
+| Retries exhausted, consecutive failure cap reached | Halt run (`fail-stop`) |
 
-Stop cancels downloads, invalidates stored task and shows stopped results. Hard halt shows its reason and recovery action. Finish persists the captured URL and refreshes outputs for remaining work. Reset cancels task/UI timers, clears local storage and keeps IDB/images; delayed writes and task callbacks cannot restore cleared state.
+### Watchdog budget
+
+- Full attempt: `generationTimeout + downloadTimeout + 15s`.
+- Download-only attempt: `downloadTimeout + 15s`.
+- Watchdog expiry marks task failure and advances without normal retry.
+
+### Stop, Reset, and Finish
+
+- **Stop**: cancels downloads, increments sequence, invalidates content, and displays stopped summary.
+- **Hard halt**: displays halt cause and suggested user recovery action.
+- **Finish**: persists captured conversation URL and refreshes output directory for remaining work.
+- **Reset**: cancels timers, clears `chrome.storage.local`, sends `RESET_STATE`, and keeps IDB handles and output files.
 
 ## 10. Validation boundary
 
 Pure policy BDD tests and required typecheck/build gates are committed. UI preview screenshots and browser/filesystem fixtures are local executor evidence. Authenticated real-site runs, non-English website controls, ChatGPT frontend paste compatibility and long service-worker behavior require manual acceptance; see [testing and quality](../testing-and-quality.md).
+

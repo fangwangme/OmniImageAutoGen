@@ -44,4 +44,4 @@ Reset clears local storage and background memory, while preserving IDB directory
 
 ## Details
 
-See the [documentation index](README.md), [normative specification](specs/dual-platform.md), [message protocol](protocol-message-contracts.md) and [testing guide](testing-and-quality.md).
+See the [documentation index](README.md), [normative specification](specs/dual-platform.md) and [testing guide](testing-and-quality.md).
