@@ -1,642 +1,315 @@
-import type { TaskItem } from "../types.js";
+import { createTranslator } from "../i18n.js";
+import { isConversationUrl } from "../utils/platforms.js";
+import { taskKey } from "../utils/outputPath.js";
 import { toSafeTaskFilename } from "../utils/taskQueue.js";
-import {
-  computeTaskWatchdogTimeoutMs,
-  isWatchdogTimeoutError
-} from "../utils/watchdogPolicy.js";
 import { decideTaskErrorOutcome } from "../utils/retryPolicy.js";
+import { computeTaskWatchdogTimeoutMs, isWatchdogTimeoutError } from "../utils/watchdogPolicy.js";
+import type { PanelMessage, TaskErrorType } from "./panelTypes.js";
+import { createRunState, emptyStages } from "./state.js";
+import type { PanelStore, RunState } from "./state.js";
+import { startRun, openSession, secondsSetting, taskError } from "./startRun.js";
+import { refreshSetup, restoreInitialState } from "./initState.js";
 import { closeCurrentTabWithPlaceholder } from "./tabHelpers.js";
-import type { PanelMessage, TaskErrorType, TaskRunMode } from "./panelTypes.js";
-import { appendRunSummary } from "./summaryLog.js";
+import { createSessionCapture } from "./sessionCapture.js";
 
-type Translator = (key: string, vars?: Record<string, string | number>) => string;
-
-export type TaskLifecycleState = {
-  taskQueue: TaskItem[];
-  currentIndex: number;
-  isRunning: boolean;
-  conversationUrl: string;
-  lockedConversationUrl: string;
-  startTime: number;
-  currentTabId: number | null;
-  retryCounts: Map<number, number>;
-  lastLogTaskIndex: number | null;
-  skippedCount: number;
-  failedCount: number;
-  consecutiveFailureCount: number;
-  nextTaskMode: TaskRunMode;
-  shouldClearLogBeforeNextTask: boolean;
-};
-
-type TaskLifecycleDeps = {
-  state: TaskLifecycleState;
-  t: Translator;
-  statusText: HTMLDivElement;
-  progressBar: HTMLDivElement;
-  progressText: HTMLSpanElement;
-  currentFileNameEl: HTMLDivElement;
-  appendLogLine: (line: string) => void;
-  formatLogData: (data: unknown) => string;
-  clearLogOutput: () => void;
-  formatDuration: (ms: number) => string;
-  updateUI: (running: boolean) => void;
-  stopTimer: () => void;
-  updateRemainingTime: () => void;
-  waitForPageLoad: (tabId: number, timeoutMs: number) => Promise<void>;
-  ensureLockedConversationTab: (
-    tabId: number,
-    pageLoadTimeout: number,
-    normalizedStepDelay: number | undefined,
-    reason: string
-  ) => Promise<boolean>;
-  storageGet: <T>(keys: string[]) => Promise<T>;
-  storageSet: (items: Record<string, unknown>) => Promise<void>;
-  runtimeSendMessage: <T>(message: unknown) => Promise<T>;
-  executeScript: (
-    injection: chrome.scripting.ScriptInjection<unknown[], unknown>
-  ) => Promise<chrome.scripting.InjectionResult<unknown>[]>;
-  tabsCreate: (props: chrome.tabs.CreateProperties) => Promise<chrome.tabs.Tab>;
-  tabsGet: (tabId: number) => Promise<chrome.tabs.Tab>;
-  tabsQuery: (queryInfo: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>;
-  tabsRemove: (tabId: number) => Promise<void>;
-};
-
-type TimeoutSnapshot = {
-  href: string;
-  readyState: string;
-  conversationContainers: number;
-  userQueries: number;
-  generatedImages: number;
-  downloadButtons: number;
-  hasInput: boolean;
-};
-
-type CheckFileExistsResponse = {
-  exists: boolean;
-  error?: string;
-  errorType?: TaskErrorType;
-};
-
-export function createTaskLifecycle(deps: TaskLifecycleDeps) {
-  const {
-    state,
-    t,
-    statusText,
-    progressBar,
-    progressText,
-    currentFileNameEl,
-    appendLogLine,
-    formatLogData,
-    clearLogOutput,
-    formatDuration,
-    updateUI,
-    stopTimer,
-    updateRemainingTime,
-    waitForPageLoad,
-    ensureLockedConversationTab,
-    storageGet,
-    storageSet,
-    runtimeSendMessage,
-    executeScript,
-    tabsCreate,
-    tabsGet,
-    tabsQuery,
-    tabsRemove
-  } = deps;
-  let activeTaskRunSeq = 0;
-  let taskWatchdogTimer: number | undefined;
-  const completionVerifyTimeoutMs = 10000;
-
-  const clearTaskWatchdog = () => {
-    if (taskWatchdogTimer) {
-      window.clearTimeout(taskWatchdogTimer);
-      taskWatchdogTimer = undefined;
-    }
+export type TaskLifecycleState = RunState;
+export function createTaskLifecycle(store: PanelStore) {
+  let epoch = 0, lastSequence = Date.now(), handlingSequence: number | null = null;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  let ticker: ReturnType<typeof setInterval> | undefined;
+  let storageChain: Promise<void> = Promise.resolve();
+  let disposed = false, resetting = false;
+  const t = (key: string, vars?: Record<string, string | number>) => createTranslator(store.state.language)(key, vars);
+  const currentRun = (run: RunState) => !disposed && store.state.run === run && run.isRunning;
+  const currentTask = (run: RunState, sequence: number, index = run.currentIndex) => currentRun(run) && sequence === run.activeTaskRunSeq && index === run.currentIndex;
+  const clearWatchdog = () => { if (watchdog !== undefined) clearTimeout(watchdog); watchdog = undefined; };
+  const clearTicker = () => { if (ticker !== undefined) clearInterval(ticker); ticker = undefined; };
+  const nextSequence = (run: RunState) => { lastSequence = Math.max(Date.now(), lastSequence + 1, run.activeTaskRunSeq + 1); run.activeTaskRunSeq = lastSequence; return lastSequence; };
+  const persist = (items: Record<string, unknown>, current: () => boolean): Promise<void> => {
+    storageChain = storageChain.catch(() => undefined).then(async () => { if (current()) await chrome.storage.local.set(items); });
+    return storageChain;
   };
-
-  const getTaskWatchdogTimeoutMs = async (taskMode: TaskRunMode) => {
-    const settings = await storageGet<{
-      settings_generationTimeout?: number;
-      settings_downloadTimeout?: number;
-      settings_pageLoadTimeout?: number;
-    }>([
-      "settings_generationTimeout",
-      "settings_downloadTimeout",
-      "settings_pageLoadTimeout"
-    ]);
-    return computeTaskWatchdogTimeoutMs(taskMode, settings);
-  };
-
-  const withTimeout = async <T>(
-    promise: Promise<T>,
-    timeoutMs: number,
-    timeoutMessage: string
-  ): Promise<T> =>
-    new Promise<T>((resolve, reject) => {
-      const timerId = window.setTimeout(() => {
-        reject(new Error(timeoutMessage));
-      }, timeoutMs);
-      promise
-        .then((value) => {
-          window.clearTimeout(timerId);
-          resolve(value);
-        })
-        .catch((error) => {
-          window.clearTimeout(timerId);
-          reject(error);
-        });
-    });
-
-  async function processNextTask() {
-    if (!state.isRunning) return;
-
-    if (state.currentIndex >= state.taskQueue.length) {
-      state.isRunning = false;
-      stopTimer();
-      updateUI(false);
-      statusText.textContent = t("sidepanel.status.allTasksCompleted");
-      statusText.style.color = "var(--success)";
-      progressBar.style.width = "100%";
-      currentFileNameEl.textContent = "";
-      const elapsedMs = Date.now() - state.startTime;
-      appendRunSummary({
-        appendLogLine,
-        t,
-        elapsedMs,
-        totalTasks: state.taskQueue.length,
-        skippedCount: state.skippedCount,
-        failedCount: state.failedCount,
-        formatDuration
-      });
-      return;
+  const capture = createSessionCapture(store, persist);
+  const cancelDownload = (reason: string) => chrome.runtime.sendMessage({ action: "DOWNLOAD_CANCEL", reason }).catch(() => undefined);
+  async function invalidate(run: RunState, guard: () => boolean) {
+    const sequence = nextSequence(run);
+    await persist({ currentTaskRunSeq: sequence, currentTask: null }, guard);
+  }
+  async function withTimeout<T>(promise: Promise<T>, timeout: number, message: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(message)), timeout); })]); }
+    finally { if (timer !== undefined) clearTimeout(timer); }
+  }
+  async function endRun(run: RunState, outcome: "finished" | "stopped" | "halted", reason?: string, errorType?: TaskErrorType) {
+    if (store.state.run !== run) return;
+    const cancel = cancelDownload(outcome);
+    epoch++; clearWatchdog(); clearTicker(); capture.stop(); handlingSequence = null;
+    run.isRunning = false; run.outcome = outcome; run.endTime = Date.now(); run.haltReason = reason; run.haltErrorType = errorType;
+    store.state.starting = false; store.state.view = "finished";
+    const endEpoch = epoch;
+    const guard = () => !disposed && store.state.run === run && endEpoch === epoch;
+    const invalidation = invalidate(run, guard);
+    if (run.sessionUrl) {
+      store.state.sessionUrls[run.platform] = run.sessionUrl; store.state.sessionMode = "existing";
+      await persist({ [`sessionUrl_${run.platform}`]: run.sessionUrl, ui_sessionMode: "existing" }, guard);
     }
-
-    const task = state.taskQueue[state.currentIndex];
-    const taskMode = state.nextTaskMode;
-    state.nextTaskMode = "full";
-    state.lastLogTaskIndex = state.currentIndex;
-    activeTaskRunSeq += 1;
-    const currentRunSeq = activeTaskRunSeq;
-
-    const total = state.taskQueue.length;
-    const displayName = toSafeTaskFilename(task.name);
-
-    progressText.textContent = t("sidepanel.status.taskProgress", {
-      current: state.currentIndex + 1,
-      total
-    });
-    progressBar.style.width = `${((state.currentIndex + 1) / total) * 100}%`;
-    statusText.textContent =
-      taskMode === "download-only"
-        ? t("sidepanel.status.retryingDownload")
-        : t("sidepanel.status.generating");
-    statusText.style.color = "var(--text)";
-    currentFileNameEl.textContent = t("sidepanel.currentFile", {
-      name: displayName
-    });
-
-    await storageSet({
-      currentTask: task,
-      currentTaskMode: taskMode,
-      currentTaskIndex: state.currentIndex,
-      currentTaskRunSeq: currentRunSeq
-    });
-
-    clearTaskWatchdog();
-    const watchdogTimeoutMs = await getTaskWatchdogTimeoutMs(taskMode);
-    appendLogLine(
-      `[Watchdog] Task timeout armed: ${Math.round(watchdogTimeoutMs / 1000)}s (mode: ${taskMode})`
-    );
-    taskWatchdogTimer = window.setTimeout(() => {
-      // Ignore stale timers from previous task runs.
-      if (currentRunSeq !== activeTaskRunSeq) return;
-      if (!state.isRunning) return;
-      const timeoutLabel = Math.round(watchdogTimeoutMs / 1000);
-      const finalizeTimeout = (extra?: string) => {
-        appendLogLine(
-          `[Watchdog] Forced timeout after ${timeoutLabel}s (mode: ${taskMode})${
-            extra ? ` | ${extra}` : ""
-          }`
-        );
-        void handleTaskError(
-          `Task watchdog timeout after ${timeoutLabel}s`,
-          taskMode === "download-only" ? "download" : "generation"
-        );
-      };
-
-      if (!state.currentTabId) {
-        finalizeTimeout("no-tab");
-        return;
-      }
-
-      void executeScript({
-        target: { tabId: state.currentTabId },
-        func: () => {
-          const q = <T extends Element>(selector: string) =>
-            document.querySelectorAll<T>(selector).length;
-          return {
-            href: location.href,
-            readyState: document.readyState,
-            conversationContainers: q<HTMLElement>(
-              ".conversation-container, .response-container, model-response"
-            ),
-            userQueries: q<HTMLElement>("user-query"),
-            generatedImages: q<HTMLImageElement>("single-image img, generated-image img, img.loaded"),
-            downloadButtons: q<HTMLButtonElement>(
-              "download-generated-image-button button, button[aria-label*='Download'], button[mattooltip*='Download']"
-            ),
-            hasInput:
-              document.querySelector(
-                '.ql-editor[contenteditable="true"], div[role="textbox"][contenteditable="true"]'
-              ) !== null
-          };
+    store.render();
+    await cancel; await invalidation;
+    if (!guard()) return;
+    await refreshSetup(store);
+    if (!guard()) return;
+    if (outcome === "halted" && errorType === "locked-url") {
+      try {
+        const targetUrl = run.sessionPending ? run.homeUrl : run.sessionUrl;
+        if (targetUrl && guard()) {
+          const tab = await chrome.tabs.create({ url: targetUrl, active: true });
+          if (guard()) run.currentTabId = tab.id ?? null;
         }
-      })
-        .then((result) => {
-          const snapshot = result?.[0]?.result as TimeoutSnapshot | undefined;
-          if (!snapshot) {
-            finalizeTimeout("snapshot-empty");
-            return;
-          }
-          finalizeTimeout(
-            `href=${snapshot.href}, ready=${snapshot.readyState}, containers=${snapshot.conversationContainers}, queries=${snapshot.userQueries}, images=${snapshot.generatedImages}, downloadBtns=${snapshot.downloadButtons}, hasInput=${snapshot.hasInput}`
-          );
-        })
-        .catch(() => {
-          finalizeTimeout("snapshot-failed");
-        });
-    }, watchdogTimeoutMs);
-
-    if (!state.currentTabId) {
-      clearTaskWatchdog();
-      statusText.textContent = t("sidepanel.status.noActiveTab");
-      statusText.style.color = "var(--danger)";
-      state.isRunning = false;
-      updateUI(false);
-      return;
+      } catch (error) { if (guard()) store.addLog("warn", String(error), { verbose: true }); }
     }
-
-    console.log(`[Panel] Injecting script for task ${state.currentIndex + 1}`);
+  }
+  async function recreate(run: RunState) {
+    const index = run.currentIndex;
+    const guard = () => currentRun(run) && run.currentIndex === index;
     try {
-      await executeScript({
-        target: { tabId: state.currentTabId },
-        func: async (...args: unknown[]) => {
-          const cacheBust = Number(args[0] ?? Date.now());
-          const moduleUrl = `${chrome.runtime.getURL("content.js")}?v=${cacheBust}`;
-          await import(moduleUrl);
-        },
-        args: [Date.now()]
-      });
-    } catch (err) {
-      clearTaskWatchdog();
-      console.error("[Panel] Injection failed:", err);
-      statusText.textContent = t("sidepanel.status.refreshGemini");
-      statusText.style.color = "var(--danger)";
-      state.isRunning = false;
-      updateUI(false);
+      const settings = await chrome.storage.local.get(["settings_taskInterval"]);
+      if (!guard()) return;
+      capture.stop();
+      await closeCurrentTabWithPlaceholder({ currentTabId: run.currentTabId, tabsGet: chrome.tabs.get.bind(chrome.tabs), tabsQuery: chrome.tabs.query.bind(chrome.tabs), tabsCreate: chrome.tabs.create.bind(chrome.tabs), tabsRemove: chrome.tabs.remove.bind(chrome.tabs), current: guard });
+      if (!guard()) return;
+      run.currentTabId = null;
+      await new Promise(resolve => setTimeout(resolve, secondsSetting(settings.settings_taskInterval, 5) * 1000));
+      if (!guard()) return;
+      await openSession(store, run, guard, false);
+      if (!guard()) return;
+      capture.start(run.currentTabId);
+      await processNextTask(run);
+    } catch (error) {
+      if (!guard()) return;
+      handlingSequence = run.activeTaskRunSeq;
+      // Only an explicit session mismatch halts the run; other tab errors are retried like any task failure.
+      await handleTaskError(run, run.activeTaskRunSeq, error instanceof Error ? error.message : String(error), (error as { errorType?: TaskErrorType })?.errorType || "generation");
     }
   }
-
-  async function recreateTab() {
-    console.log("[Panel] Recreating tab...");
-    statusText.textContent = t("sidepanel.status.resettingBrowserContext");
-
-    const settings = await storageGet<{
-      settings_taskInterval?: number;
-      settings_pageLoadTimeout?: number;
-      settings_stepDelay?: number;
-    }>(["settings_taskInterval", "settings_pageLoadTimeout", "settings_stepDelay"]);
-    const taskInterval = (settings.settings_taskInterval || 5) * 1000;
-    const pageLoadTimeout = (settings.settings_pageLoadTimeout || 30) * 1000;
-
-    await closeCurrentTabWithPlaceholder({
-      currentTabId: state.currentTabId,
-      tabsGet,
-      tabsQuery,
-      tabsCreate,
-      tabsRemove
-    });
-
-    await new Promise((r) => setTimeout(r, taskInterval));
-    if (!state.isRunning) return;
-
-    console.log(`[Panel] Opening new tab: ${state.conversationUrl}`);
-    const newTab = await tabsCreate({ url: state.conversationUrl });
-    state.currentTabId = newTab.id ?? null;
-
-    if (!state.currentTabId) {
-      statusText.textContent = t("sidepanel.status.errorCreateTab");
-      statusText.style.color = "var(--danger)";
-      state.isRunning = false;
-      updateUI(false);
-      return;
-    }
-
-    await waitForPageLoad(state.currentTabId, pageLoadTimeout);
-
-    const rawStepDelay = settings.settings_stepDelay;
-    const normalizedStepDelay =
-      rawStepDelay && rawStepDelay > 60 ? rawStepDelay / 1000 : rawStepDelay;
-    const tabReadyDelayMs = (normalizedStepDelay || 1) * 2 * 1000;
-    await new Promise((r) => setTimeout(r, tabReadyDelayMs));
-
-    if (state.lockedConversationUrl) {
-      const lockOk = await ensureLockedConversationTab(
-        state.currentTabId,
-        pageLoadTimeout,
-        normalizedStepDelay,
-        "new tab"
-      );
-      if (!lockOk || !state.isRunning) return;
-    }
-
-    if (!state.isRunning) return;
-
-    if (state.shouldClearLogBeforeNextTask) {
-      clearLogOutput();
-      state.shouldClearLogBeforeNextTask = false;
-    }
-
-    void processNextTask();
+  async function advance(run: RunState) {
+    if (!currentRun(run)) return;
+    run.currentIndex++;
+    run.nextTaskMode = "full";
+    handlingSequence = null;
+    await invalidate(run, () => currentRun(run));
+    if (!currentRun(run)) return;
+    store.render();
+    if (run.currentIndex >= run.taskQueue.length) await endRun(run, "finished");
+    else await recreate(run);
   }
-
-  async function handleTaskError(error: string, errorType?: TaskErrorType) {
-    console.error(`[Panel] Task error: ${error}`);
-    clearTaskWatchdog();
-    if (!state.isRunning) return;
-    const isWatchdogTimeout = isWatchdogTimeoutError(error);
-
-    if (isWatchdogTimeout) {
-      state.retryCounts.delete(state.currentIndex);
-      state.failedCount += 1;
-      state.consecutiveFailureCount += 1;
-      appendLogLine(
-        `Failed task ${state.currentIndex + 1} (watchdog-timeout): ${error}`
-      );
-      statusText.textContent = t("sidepanel.status.failed", { error });
-      statusText.style.color = "var(--danger)";
-
-      state.currentIndex += 1;
-      updateRemainingTime();
-
-      if (state.currentIndex < state.taskQueue.length && state.isRunning) {
-        state.nextTaskMode = "full";
-        void recreateTab();
-      } else {
-        void processNextTask();
-      }
+  async function handleTaskError(run: RunState, sequence: number, error: string, errorType?: TaskErrorType) {
+    if (!currentTask(run, sequence)) return;
+    const index = run.currentIndex, task = run.taskQueue[index];
+    const guard = () => currentRun(run) && run.currentIndex === index;
+    const cancel = cancelDownload("task-error");
+    clearWatchdog();
+    await invalidate(run, guard);
+    await cancel;
+    if (!guard()) return;
+    const key = task ? taskKey(run.platform, task.name) : "";
+    const retries = run.retryCounts.get(key) || 0;
+    if (isWatchdogTimeoutError(error)) {
+      run.retryCounts.delete(key); run.failedCount++; run.consecutiveFailureCount++;
+      run.results.set(index, { outcome: "failed", error, errorType, retries });
+      store.addLog("error", t("lifecycle.failed", { pos: index + 1, file: toSafeTaskFilename(task?.name || ""), error }));
+      await advance(run);
       return;
     }
-
-    const settings = await storageGet<{
-      settings_maxRetries?: number;
-      settings_maxConsecutiveFailures?: number;
-    }>(["settings_maxRetries", "settings_maxConsecutiveFailures"]);
-    const maxRetries = Math.max(0, settings.settings_maxRetries ?? 3);
-    const maxConsecutiveFailures = Math.max(
-      0,
-      settings.settings_maxConsecutiveFailures ?? 5
-    );
-    const currentRetries = state.retryCounts.get(state.currentIndex) ?? 0;
-    const decision = decideTaskErrorOutcome({
-      error,
-      errorType,
-      currentRetries,
-      maxRetries,
-      consecutiveFailureCount: state.consecutiveFailureCount,
-      maxConsecutiveFailures
-    });
-    const resolvedErrorType = decision.resolvedErrorType;
-
-    if (decision.action === "stop-locked-url") {
-      statusText.textContent = error || t("sidepanel.status.lockedUrlError");
-      statusText.style.color = "var(--danger)";
-      appendLogLine(`Locked URL error - stopped: ${error}`);
-      state.isRunning = false;
-      stopTimer();
-      updateUI(false);
-      const storedUrl = await storageGet<{ lockedConversationUrl?: string }>([
-        "lockedConversationUrl"
-      ]);
-      const targetUrl =
-        storedUrl.lockedConversationUrl || state.lockedConversationUrl;
-      if (targetUrl) {
-        state.conversationUrl = targetUrl;
-        try {
-          const newTab = await tabsCreate({ url: targetUrl, active: true });
-          state.currentTabId = newTab.id ?? null;
-        } catch (err) {
-          console.warn("[Panel] Failed to open locked URL tab:", err);
-        }
-      }
+    const settings = await chrome.storage.local.get(["settings_maxRetries", "settings_maxConsecutiveFailures"]);
+    if (!guard()) return;
+    run.maxRetries = Math.max(0, settings.settings_maxRetries ?? 3);
+    run.maxConsecutiveFailures = Math.max(0, settings.settings_maxConsecutiveFailures ?? 5);
+    const decision = decideTaskErrorOutcome({ error, errorType, currentRetries: retries, maxRetries: run.maxRetries, consecutiveFailureCount: run.consecutiveFailureCount, maxConsecutiveFailures: run.maxConsecutiveFailures });
+    if (decision.action === "stop-locked-url" || decision.action === "stop-folder") {
+      run.results.set(index, { outcome: "failed", error, errorType: decision.resolvedErrorType, retries });
+      store.addLog("error", t("lifecycle.halted", { reason: error }));
+      await endRun(run, "halted", error, decision.resolvedErrorType);
       return;
     }
-
-    if (decision.action === "stop-folder") {
-      statusText.textContent = t("sidepanel.status.folderAccessError", {
-        error
-      });
-      statusText.style.color = "var(--danger)";
-      appendLogLine(`Folder access error - stopped: ${error}`);
-      state.isRunning = false;
-      stopTimer();
-      updateUI(false);
-      return;
-    }
-
     if (decision.action === "retry-download" || decision.action === "retry-full") {
-      const nextRetry = decision.nextRetryCount;
-      state.retryCounts.set(state.currentIndex, nextRetry);
-      const retryLabel =
-        decision.action === "retry-download"
-          ? t("sidepanel.status.retryingDownloadShort")
-          : t("sidepanel.status.retrying");
-      statusText.textContent = t("sidepanel.status.retryingWithCount", {
-        label: retryLabel,
-        current: nextRetry,
-        max: maxRetries
-      });
-      statusText.style.color = "var(--warning)";
-      if (decision.action === "retry-download") {
-        state.nextTaskMode = "download-only";
-        appendLogLine("[Retry] Recreating tab before download-only retry");
-      } else {
-        state.nextTaskMode = "full";
-        appendLogLine("[Retry] Recreating tab before full retry");
-      }
-      void recreateTab();
+      run.retryCounts.set(key, decision.nextRetryCount);
+      run.nextTaskMode = decision.action === "retry-download" && !run.sessionPending ? "download-only" : "full";
+      store.addLog("warn", t(run.nextTaskMode === "download-only" ? "lifecycle.retryDownload" : "lifecycle.retryFull", { current: decision.nextRetryCount, max: run.maxRetries }));
+      handlingSequence = null;
+      await recreate(run);
       return;
     }
-
-    state.retryCounts.delete(state.currentIndex);
-    if (decision.shouldIncrementFailedCount) {
-      state.failedCount += 1;
-    }
-    state.consecutiveFailureCount = decision.nextConsecutiveFailureCount;
-    appendLogLine(
-      `Failed task ${state.currentIndex + 1} (${resolvedErrorType}): ${error}`
-    );
-    statusText.textContent = t("sidepanel.status.failed", { error });
-    statusText.style.color = "var(--danger)";
-
+    run.retryCounts.delete(key);
+    if (decision.shouldIncrementFailedCount) run.failedCount++;
+    run.consecutiveFailureCount = decision.nextConsecutiveFailureCount;
+    run.results.set(index, { outcome: "failed", error, errorType: decision.resolvedErrorType, retries });
+    store.addLog("error", t("lifecycle.failed", { pos: index + 1, file: toSafeTaskFilename(task?.name || ""), error }));
     if (decision.action === "fail-stop") {
-      statusText.textContent = t("sidepanel.status.stoppedAfterFailures", {
-        count: state.consecutiveFailureCount,
-        error
-      });
-      statusText.style.color = "var(--danger)";
-      state.isRunning = false;
-      stopTimer();
-      updateUI(false);
-      return;
-    }
-
-    state.currentIndex += 1;
-    updateRemainingTime();
-
-    if (state.currentIndex < state.taskQueue.length && state.isRunning) {
-      state.nextTaskMode = "full";
-      void recreateTab();
-    } else {
-      void processNextTask();
+      const reason = t("lifecycle.failureLimit", { count: run.consecutiveFailureCount, error });
+      store.addLog("error", t("lifecycle.halted", { reason }));
+      await endRun(run, "halted", reason, decision.resolvedErrorType);
+    } else await advance(run);
+  }
+  async function processNextTask(run: RunState) {
+    if (!currentRun(run)) return;
+    if (run.currentIndex >= run.taskQueue.length) return endRun(run, "finished");
+    const task = run.taskQueue[run.currentIndex], index = run.currentIndex;
+    const sequence = nextSequence(run), guard = () => currentTask(run, sequence, index);
+    handlingSequence = null;
+    run.currentTaskMode = run.nextTaskMode; run.nextTaskMode = "full";
+    run.attempt = (run.retryCounts.get(taskKey(run.platform, task.name)) || 0) + 1;
+    const openStage = run.stages["open-session"];
+    run.stages = emptyStages(); run.stages["open-session"] = openStage;
+    store.addLog("info", t("lifecycle.taskStarted", { pos: index + 1, file: toSafeTaskFilename(task.name), attempt: run.attempt }));
+    try {
+      const settings = await chrome.storage.local.get(["settings_generationTimeout", "settings_downloadTimeout"]);
+      if (!guard()) return;
+      run.downloadTimeout = secondsSetting(settings.settings_downloadTimeout, 120);
+      await persist({ currentTask: task, currentTaskMode: run.currentTaskMode, currentTaskIndex: index, currentTaskRunSeq: sequence, currentTaskPlatform: run.platform,
+        currentSessionUrl: run.sessionUrl, currentSessionPending: run.sessionPending, currentHomeUrl: run.homeUrl, currentTaskAttempt: run.attempt }, guard);
+      if (!guard()) return;
+      clearWatchdog();
+      const timeoutMs = computeTaskWatchdogTimeoutMs(run.currentTaskMode, settings);
+      watchdog = setTimeout(() => {
+        if (!guard() || handlingSequence === sequence) return;
+        void cancelDownload("watchdog");
+        handlingSequence = sequence;
+        store.addLog("error", t("lifecycle.timedOut", { seconds: Math.round(timeoutMs / 1000) }));
+        void handleTaskError(run, sequence, `Task watchdog timeout after ${Math.round(timeoutMs / 1000)}s`, run.currentTaskMode === "download-only" ? "download" : "generation");
+      }, timeoutMs);
+      if (run.currentTabId === null) throw taskError(t("lifecycle.noTab"), "locked-url");
+      await chrome.scripting.executeScript({ target: { tabId: run.currentTabId }, func: async (cacheBust: number) => { await import(`${chrome.runtime.getURL("content.js")}?v=${cacheBust}&taskRunSeq=${cacheBust}`); }, args: [sequence] });
+      if (!guard()) return;
+    } catch (error) {
+      if (!guard() || handlingSequence === sequence) return;
+      handlingSequence = sequence;
+      await handleTaskError(run, sequence, error instanceof Error ? error.message : String(error), (error as { errorType?: TaskErrorType })?.errorType || "generation");
     }
   }
-
-  function handlePanelMessage(request: PanelMessage) {
-    const isTaskScopedMessage =
-      request.action === "TASK_COMPLETE" ||
-      request.action === "TASK_ERROR" ||
-      request.action === "UPDATE_STATUS";
-    if (isTaskScopedMessage) {
-      if (
-        typeof request.taskRunSeq === "number" &&
-        request.taskRunSeq !== activeTaskRunSeq
-      ) {
-        appendLogLine(
-          `[Panel] Ignored stale ${request.action}: runSeq=${request.taskRunSeq}, current=${activeTaskRunSeq}`
-        );
-        return;
+  async function complete(run: RunState, sequence: number, request: Extract<PanelMessage, { action: "TASK_COMPLETE" }>) {
+    const index = run.currentIndex;
+    const guard = () => currentTask(run, sequence, index);
+    clearWatchdog();
+    try {
+      const task = run.taskQueue[index];
+      if (!task) throw taskError("Task completion has no active task", "generation");
+      if (!request.skipped && run.sessionPending) {
+        const tab = run.currentTabId === null ? undefined : await chrome.tabs.get(run.currentTabId);
+        if (!guard()) return;
+        if (tab?.url && isConversationUrl(run.platform, tab.url)) await capture.capture(run, tab.url);
+        if (!guard()) return;
+        if (run.sessionPending) throw taskError(t("lifecycle.captureMissing"), "locked-url");
       }
-      if (
-        typeof request.taskIndex === "number" &&
-        request.taskIndex !== state.currentIndex
-      ) {
-        appendLogLine(
-          `[Panel] Ignored stale ${request.action}: taskIndex=${request.taskIndex}, current=${state.currentIndex}`
-        );
-        return;
+      if (!request.skipped) {
+        const filename = toSafeTaskFilename(task.name);
+        const result = await withTimeout(chrome.runtime.sendMessage({ action: "CHECK_FILE_EXISTS", platform: run.platform, filename }) as Promise<{ exists: boolean; error?: string; errorType?: TaskErrorType }>, 10000, `Post-check timeout after 10s for ${filename}`);
+        if (!guard()) return;
+        if (result.error) throw taskError(result.error, result.errorType || "download");
+        if (!result.exists) throw taskError(`Post-check missing output: ${filename}`, "download");
       }
-    }
-
-    if (request.action === "TASK_COMPLETE") {
-      clearTaskWatchdog();
-      const completedTaskIndex = state.currentIndex;
-      const completedRunSeq = activeTaskRunSeq;
-      const finalizeTaskComplete = () => {
-        if (!state.isRunning) return;
-        if (
-          completedTaskIndex !== state.currentIndex ||
-          completedRunSeq !== activeTaskRunSeq
-        ) {
-          appendLogLine(
-            `[Panel] Dropped late TASK_COMPLETE for task ${completedTaskIndex + 1}`
-          );
-          return;
-        }
-        console.log(
-          `[Panel] Task ${state.currentIndex + 1} complete (skipped: ${
-            request.skipped
-          })`
-        );
-        state.retryCounts.delete(state.currentIndex);
-        if (request.skipped) {
-          state.skippedCount += 1;
-        }
-        state.consecutiveFailureCount = 0;
-        state.shouldClearLogBeforeNextTask = true;
-        state.currentIndex += 1;
-        updateRemainingTime();
-
-        if (state.currentIndex < state.taskQueue.length && state.isRunning) {
-          void recreateTab();
-        } else {
-          void processNextTask();
-        }
-      };
-
+      if (!guard()) return;
+      const retries = run.retryCounts.get(taskKey(run.platform, task.name)) || 0;
+      run.retryCounts.delete(taskKey(run.platform, task.name));
       if (request.skipped) {
-        finalizeTaskComplete();
-        return;
+        run.skippedCount++;
+        const warning = request.skipReason === "warning";
+        run.results.set(index, { outcome: warning ? "skipped-warning" : "skipped-exists", warningExcerpt: request.warningExcerpt, retries });
+        store.addLog("warn", t(warning ? "lifecycle.skippedWarning" : "lifecycle.skippedExists", { pos: index + 1, file: toSafeTaskFilename(task.name) }));
+      } else {
+        run.savedCount++; run.results.set(index, { outcome: "saved", retries });
+        store.addLog("ok", t("lifecycle.saved", { pos: index + 1, file: toSafeTaskFilename(task.name) }));
       }
-
-      const task = state.taskQueue[state.currentIndex];
-      if (!task) {
-        void handleTaskError("Task completion received with no active task", "generation");
-        return;
-      }
-      const expectedFilename = toSafeTaskFilename(task.name);
-      void withTimeout(
-        runtimeSendMessage<CheckFileExistsResponse>({
-          action: "CHECK_FILE_EXISTS",
-          filename: expectedFilename
-        }),
-        completionVerifyTimeoutMs,
-        `Post-check timeout after ${Math.round(completionVerifyTimeoutMs / 1000)}s for ${expectedFilename}`
-      )
-        .then((verifyResult) => {
-          if (verifyResult?.error) {
-            void handleTaskError(verifyResult.error, verifyResult.errorType);
-            return;
-          }
-          if (!verifyResult?.exists) {
-            appendLogLine(
-              `[Panel] Completion verification failed: missing ${expectedFilename}`
-            );
-            void handleTaskError(
-              `Post-check missing output: ${expectedFilename}`,
-              "download"
-            );
-            return;
-          }
-          finalizeTaskComplete();
-        })
-        .catch((err) => {
-          const message = err instanceof Error ? err.message : String(err);
-          void handleTaskError(
-            `Post-check failed for ${expectedFilename}: ${message}`,
-            "download"
-          );
-        });
-      return;
-    }
-
-    if (request.action === "TASK_ERROR") {
-      clearTaskWatchdog();
-      void handleTaskError(request.error, request.errorType);
-      return;
-    }
-
-    if (request.action === "UPDATE_STATUS") {
-      statusText.textContent = request.status;
-      statusText.style.color = request.isError ? "var(--danger)" : "var(--text)";
-      return;
-    }
-
-    if (request.action === "PANEL_LOG") {
-      const sourceTag = request.source ? `[${request.source}] ` : "";
-      const levelTag = request.level ? `[${request.level}] ` : "";
-      const dataText = formatLogData(request.data);
-      appendLogLine(
-        `[${request.timestamp}] ${sourceTag}${levelTag}${request.message}${dataText}`
-      );
+      run.consecutiveFailureCount = 0;
+      await advance(run);
+    } catch (error) {
+      if (!guard()) return;
+      await handleTaskError(run, sequence, error instanceof Error ? error.message : String(error), (error as { errorType?: TaskErrorType })?.errorType || "download");
     }
   }
-
-  return {
-    processNextTask,
-    recreateTab,
-    handleTaskError,
-    handlePanelMessage,
-    cancelTaskWatchdog: clearTaskWatchdog
-  };
+  function handlePanelMessage(request: PanelMessage) {
+    const run = store.state.run;
+    if (request.action === "PANEL_LOG") {
+      if (request.taskRunSeq !== undefined && request.taskRunSeq !== run.activeTaskRunSeq) return;
+      if (request.taskIndex !== undefined && request.taskIndex !== run.currentIndex) return;
+      store.addLog(request.level === "log" ? "info" : request.level, request.message, { verbose: request.verbose ?? !request.event, data: request.data, timestamp: request.timestamp });
+      return;
+    }
+    if (!currentRun(run) || request.taskRunSeq !== run.activeTaskRunSeq || request.taskIndex !== run.currentIndex) return;
+    const sequence = run.activeTaskRunSeq;
+    if (request.action === "TASK_STAGE") {
+      if (handlingSequence === sequence || !run.stages[request.stage]) return;
+      const now = Date.now(), stage = run.stages[request.stage];
+      if (request.status === "active") {
+        for (const previous of Object.values(run.stages)) if (previous !== stage && previous.status === "active") {
+          previous.status = "done"; previous.endedAt = now; previous.meta ||= `${Math.round((now - (previous.startedAt || now)) / 1000)}s`;
+        }
+        stage.startedAt = now; stage.endedAt = undefined;
+      } else { stage.endedAt = now; }
+      stage.status = request.status;
+      stage.meta = request.meta || (request.status === "reused" || request.status === "skipped" ? request.status : request.status === "done" && stage.startedAt ? `${Math.round((now - stage.startedAt) / 1000)}s` : undefined);
+      store.render();
+    } else if (request.action === "TASK_COMPLETE" || request.action === "TASK_ERROR") {
+      if (handlingSequence === sequence) return;
+      handlingSequence = sequence;
+      if (request.action === "TASK_COMPLETE") void complete(run, sequence, request);
+      else void handleTaskError(run, sequence, request.error, request.errorType);
+    }
+  }
+  async function start() {
+    if (disposed || resetting || store.state.starting || store.state.run.isRunning) return;
+    const startEpoch = ++epoch;
+    const run = createRunState(store.state.platform, store.state.sessionMode);
+    store.state.run = run; store.state.starting = true;
+    const guard = () => !disposed && epoch === startEpoch && store.state.run === run;
+    store.render();
+    try {
+      await cancelDownload("start");
+      if (!guard()) return;
+      const started = await startRun(store, run, guard);
+      if (!guard()) return;
+      store.state.starting = false;
+      if (!started) { store.render(); return; }
+      capture.start(run.currentTabId);
+      clearTicker(); ticker = setInterval(() => { if (currentRun(run)) store.render(); }, 1000);
+      await processNextTask(run);
+    } catch (error) {
+      if (!guard()) return;
+      store.state.starting = false;
+      const message = error instanceof Error ? error.message : String(error);
+      store.addLog("error", t("lifecycle.halted", { reason: message }));
+      await endRun(run, "halted", message, (error as { errorType?: TaskErrorType })?.errorType || "locked-url");
+    }
+  }
+  async function stop() {
+    const run = store.state.run;
+    if (!run.isRunning && !store.state.starting) return;
+    store.addLog("warn", t("lifecycle.stopped"));
+    await endRun(run, "stopped");
+  }
+  async function reset(options: { clearStorage?: boolean } = { clearStorage: true }) {
+    if (resetting) return;
+    resetting = true;
+    const cancel = cancelDownload("reset");
+    epoch++; clearWatchdog(); clearTicker(); capture.stop(); handlingSequence = null;
+    const oldRun = store.state.run;
+    oldRun.isRunning = false; store.state.starting = false;
+    if (options.clearStorage !== false) await invalidate(oldRun, () => !disposed && store.state.run === oldRun);
+    else nextSequence(oldRun);
+    await cancel;
+    if (options.clearStorage !== false) await chrome.storage.local.clear();
+    await chrome.runtime.sendMessage({ action: "RESET_STATE" }).catch(() => undefined);
+    if (disposed) { resetting = false; return; }
+    store.state.run = createRunState(); store.state.view = "setup"; store.state.logs = []; store.state.setupMessage = undefined;
+    store.state.loadedTasks = []; store.state.loadedTasksRaw = []; store.state.loadedTasksFileName = ""; store.state.tasksState = { hasFile: false, tasks: [], issues: [], total: 0 };
+    await restoreInitialState(store);
+    resetting = false; store.render();
+  }
+  function dispose() {
+    disposed = true; epoch++; clearWatchdog(); clearTicker(); capture.dispose();
+    const run = store.state.run;
+    run.isRunning = false;
+    void cancelDownload("panel-closed");
+    void invalidate(run, () => true).catch(() => undefined);
+  }
+  return { start, stop, reset, handlePanelMessage, dispose };
 }

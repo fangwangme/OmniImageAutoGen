@@ -26,6 +26,17 @@ describe("Content history wait (BDD)", () => {
     assert.equal(result.reason, "last-response-text-warning");
   });
 
+  bddIt("Given a completed text reply without image or warning, When evaluating wait state, Then proceed instead of waiting for an image", () => {
+    const result = evaluateContentHistoryImageWait({
+      hasAnyImage: false,
+      lastImageLoaded: false,
+      hasTextOnlyWarning: false,
+      hasCompletedTextReply: true
+    });
+    assert.equal(result.shouldWait, false);
+    assert.equal(result.reason, "last-response-text-complete");
+  });
+
   bddIt("Given image exists but not loaded, When evaluating wait state, Then keep waiting for image load", () => {
     const result = evaluateContentHistoryImageWait({
       hasAnyImage: true,

@@ -1,43 +1,67 @@
-# Testing and Quality
+# Testing and quality
 
-This document tracks automated coverage and validation workflow.
-
-## Validation Commands
+## Required commands
 
 ```bash
-npm run typecheck
-npm run test:bdd:quiet
-npm run build
+bun run typecheck
+bun run build
+bun run test:bdd:quiet
 ```
 
-## Current Automated Coverage
+The BDD test suite covers platform and session URL validation, state migration, task validation, prompt formatting, platform output keys, candidate download selection, image format decisions, run readiness, retry and watchdog policies, filename/queue filtering, window protection, and content history wait.
 
-BDD suite directory: `tests/bdd/`
+The suite imports pure JavaScript policy modules. Chrome DOM interaction, filesystem integration and image encoding are verified via preview/integration checks. A Node reporter may summarize test files rather than individual scenarios; retain failure status and relevant assertions as evidence.
 
-Covered areas:
-- error classification (`errorClassifier`)
-- retry decisions (`retryPolicy`)
-- queue and filename normalization (`taskQueue`)
-- locked URL validation/matching (`lockedConversation`)
-- content history wait policy (`contentHistoryWait`)
-- watchdog timeout policy (`watchdogPolicy`)
-- placeholder tab policy (`placeholderPolicy`)
+## Regression evidence
 
-## Coverage Gaps (Known)
+For a representative case such as case-insensitive filename collision:
 
-- End-to-end browser-driven flow tests are not automated in CI.
-- DOM-heavy content execution is covered mainly by runtime logging + manual verification.
-- Background FS operations are validated indirectly, not with full integration harness.
+1. Run the correct implementation and confirm it passes.
+2. Temporarily remove case normalization from that comparison.
+3. Run the affected test and capture its failing assertion.
+4. Restore the implementation and rerun all three required commands.
 
-## Quality Gate Recommendation
+Keep the intentional regression out of commits. Evidence should quote only relevant lines and identify whether it came from executor self-checks, browser fixtures or user acceptance. Local fixtures are additional evidence, not part of the committed test guarantee.
 
-Before release:
+## Build checks
 
-1. Run all validation commands above.
-2. Reload extension and run at least one small real task batch.
-3. Confirm sidepanel log has:
-   - timing config
-   - successful generation detection
-   - successful download rename/move
-4. Print and verify release title in terminal:
-   - `echo "Release title: vX.Y.Z"`
+Verify the built manifest has both platform host permissions and web-accessible matches, the OmniImageAutoGen name and version 0.1.0.
+
+```bash
+jq '.host_permissions, .web_accessible_resources[0].matches, .name, .version' .local/dist/manifest.json
+rg -n "Math.abs\(ratio - 1.0\)|CONFIG_DOWNLOAD_TRIGGER_TIMEOUT|isPreferredGeminiFilename|getDownloadMenuItem|WAIT_AND_RENAME" src
+rg -n "https?://" .local/dist/*.html .local/dist/styles .local/dist/*.js | rg -v "gemini.google.com|chatgpt.com|www.w3.org"
+```
+
+The removal/remote-resource scans should have no output. Fonts and interface assets must be local. Review the complete diff for scope and public-content hygiene; do not commit local evidence, agent state, real chat URLs or personal paths.
+
+## UI previews
+
+Build first, then run `bun run preview:ui`. Open the printed local HTTP URL. Module scripts require HTTP rather than direct file opening.
+
+Panel preview states are `setup, setup-attention, running, finished, stopped, halted, pending-session` via `sidepanel.html?preview=<state>`. Settings uses `options.html?preview=1`. Optional `lang=zh` previews Chinese.
+
+Preview is enabled only when there is a preview parameter and no extension runtime ID. Normal extension pages ignore preview parameters. Preview data makes no Chrome/IDB calls.
+
+Compare every state to the design frames, including system dark mode, Settings and a 320px panel. Store screenshots under `.local/data/` without committing them. For example, with Chromium available:
+
+```bash
+chromium --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=400,900 --virtual-time-budget=3000 --screenshot=.local/data/ui-running.png "http://127.0.0.1:4173/sidepanel.html?preview=running"
+```
+
+Check layout, color, spacing, text and overflow; minor font rasterization differences are acceptable. Previews validate UI rendering, not real website automation.
+
+## Manual acceptance
+
+Load `.local/dist`; sign into both websites. Source must be Chrome's automatic download directory, Output an authorized directory, and download-location prompts disabled. Use a two-task JSON array with distinct names.
+
+1. **Gemini New session:** start from an active Gemini tab with `/u/<n>/`; confirm the computed home retains that prefix. After the first send, confirm link capture and the second image in the same chat. Two outputs must be under `Output/gemini/`, with real PNG format for PNG targets.
+2. **Gemini Existing session:** remove one output and rerun with the retained link; only the missing image runs.
+3. **ChatGPT New/Existing:** repeat both checks with `Output/chatgpt/`.
+4. **Download-only retry:** reduce Download timeout during a run, for example to 3s. Observe the download-only retry event and confirm no new prompt is sent.
+5. **Stop:** stop during Download original. A source file arriving afterward must not be moved or renamed into Output by that cancelled attempt.
+6. **All saved:** rerun with all outputs present; setup shows **All N images already saved**.
+7. **Wrong platform URL:** paste a Gemini chat URL while ChatGPT is selected; confirm the error and **Switch to Gemini** action.
+8. **Expired directory access:** revoke Output permission; readiness offers **Allow again**, and granting access restores readiness.
+
+Real authenticated site runs, non-English site UI, changing ChatGPT paste behavior and long service-worker lifetime remain manual checks. Test results and fixture evidence should not claim these were verified unless they actually were.

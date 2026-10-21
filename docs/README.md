@@ -1,25 +1,7 @@
-# Technical Docs Index
+# Technical documentation
 
-This folder contains implementation-focused documentation.
+- [System architecture](ARCHITECTURE.md): Component responsibilities, execution flow, session lifecycle, cancellation and recovery.
+- [Dual-platform specification](specs/dual-platform.md): Complete normative specification defining data types, platform URL rules, task JSON validation, storage keys, adapter interfaces, DOM selectors, runtime messages, download algorithm, and state machines.
+- [Testing and quality](testing-and-quality.md): Automated BDD coverage, UI preview verification, and manual acceptance checklist.
 
-## Start Here
-
-- `ARCHITECTURE.md`: high-level architecture overview and module map.
-- Operational baseline: use locked existing conversation with at least one generated image (avoid fresh `new conversation` threads for stable runs).
-
-## Detailed Business Logic
-
-- `flow-sidepanel-task-lifecycle.md`: run orchestration, retries, tab recreation, watchdog.
-- `flow-content-execution.md`: per-task content script flow on Gemini page.
-- `flow-background-download-pipeline.md`: download detection, stabilization, validation, rename/move.
-- `timeout-and-retry-model.md`: all timeout sources and retry behavior by layer.
-- `protocol-message-contracts.md`: runtime message protocol, payload schemas, and error semantics.
-- `state-machines.md`: sidepanel/content/background state transitions and stop conditions.
-- `config-and-storage-contracts.md`: storage keys, defaults, and cross-module ownership.
-- `selectors-and-dom-contracts.md`: critical DOM selectors and invariants used for Gemini interaction.
-
-## Engineering Operations
-
-- `testing-and-quality.md`: current automated coverage and validation commands.
-- `troubleshooting-playbook.md`: practical diagnosis checklist for common stuck/failure scenarios.
-- release notes generator (stdout by default): `npm run release:notes -- --help`
+For user installation, setup, and usage guides, see [README.md](../README.md) and [README.zh-CN.md](../README.zh-CN.md).

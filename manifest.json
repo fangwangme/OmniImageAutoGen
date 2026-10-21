@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Nano Banana Image Generator",
-  "version": "5.0.2",
-  "description": "Auto generate & download high-res images from Gemini with precise control",
+  "name": "OmniImageAutoGen",
+  "version": "0.1.0",
+  "description": "Batch-generate and save full-size images from ChatGPT or Gemini with precise file names",
   "permissions": [
     "activeTab",
     "scripting",
@@ -12,7 +12,8 @@
     "sidePanel"
   ],
   "host_permissions": [
-    "https://gemini.google.com/*"
+    "https://gemini.google.com/*",
+    "https://chatgpt.com/*"
   ],
   "web_accessible_resources": [
     {
@@ -21,12 +22,13 @@
         "chunks/*.js"
       ],
       "matches": [
-        "https://gemini.google.com/*"
+        "https://gemini.google.com/*",
+        "https://chatgpt.com/*"
       ]
     }
   ],
   "action": {
-    "default_title": "Open Nano Banana Image Generator"
+    "default_title": "Open OmniImageAutoGen"
   },
   "side_panel": {
     "default_path": "sidepanel.html"

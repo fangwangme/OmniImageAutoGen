@@ -23,21 +23,4 @@ describe("Sidepanel Workflow Logic", () => {
       assert.strictEqual(result, false, "Should not require placeholder when other tabs exist");
     });
   });
-
-  describe("Log Management", () => {
-    // Mocking the behavior of log clearing
-    let logOutput = "old log content";
-    const clearLogOutput = () => { logOutput = ""; };
-
-    bddIt("Given an existing log output, " +
-          "When a new task starts, " +
-          "Then the log output should be cleared", () => {
-      assert.notStrictEqual(logOutput, "");
-      
-      // Simulate task start
-      clearLogOutput();
-      
-      assert.strictEqual(logOutput, "", "Log output should be empty after clearing");
-    });
-  });
 });
