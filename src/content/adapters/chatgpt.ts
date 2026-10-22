@@ -80,19 +80,27 @@ export function createChatGPTAdapter(t: Translator, signal?: AbortSignal): Platf
     async ensureImageMode() {
       assertNotAborted(signal);
       imageModeSelected = !!pill();
-      if (imageModeSelected) return "ok";
+      if (imageModeSelected) {
+        console.log("[Omni:Content] ChatGPT already in image mode (pill detected)");
+        return "ok";
+      }
       try {
         const tools = firstVisible<HTMLElement>(SELECTORS.tools);
-        if (!tools) return "not-found";
+        if (!tools) {
+          console.warn("[Omni:Content] ChatGPT tools button not found");
+          return "not-found";
+        }
         clickLikeUser(tools, signal);
         const menuItem = () => Array.from(document.querySelectorAll<HTMLElement>(SELECTORS.imageItem)).find(element => isVisible(element) && (normalizeText(element.innerText).includes("Create image") || normalizeText(element.innerText).includes("创建图片"))) || null;
         await waitFor(() => !!menuItem(), 2000, 100, "Image mode menu not found", signal);
         clickLikeUser(menuItem()!, signal);
         await waitFor(() => !!pill(), 3000, 100, "Image mode not selected", signal);
         imageModeSelected = true;
+        console.log("[Omni:Content] ChatGPT image mode successfully selected");
         return "ok";
       } catch (error) {
         assertNotAborted(signal);
+        console.warn("[Omni:Content] Failed to activate ChatGPT image mode:", error);
         pressEscape(signal);
         return "not-found";
       }

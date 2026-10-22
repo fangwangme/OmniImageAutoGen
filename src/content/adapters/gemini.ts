@@ -106,14 +106,21 @@ export function createGeminiAdapter(t: Translator, signal?: AbortSignal): Platfo
     scrollToBottom: stepDelayMs => scrollPageToBottom(stepDelayMs, signal),
     async ensureImageMode(stepDelayMs) {
       assertNotAborted(signal);
-      if (imageMode()) return "ok";
+      if (imageMode()) {
+        console.log("[Omni:Content] Gemini already in image mode");
+        return "ok";
+      }
       if (imageItem()?.getAttribute("aria-checked") === "true") {
         pressEscape(signal);
+        console.log("[Omni:Content] Gemini image mode item already checked");
         return "ok";
       }
       try {
         const tools = firstVisible<HTMLElement>(SELECTORS.tools);
-        if (!tools) return "not-found";
+        if (!tools) {
+          console.warn("[Omni:Content] Gemini tools button not found");
+          return "not-found";
+        }
         clickLikeUser(tools, signal);
         await waitFor(() => !!imageItem(), Math.max(2000, stepDelayMs * 3), 100, "Image mode menu not found", signal);
         const item = imageItem();
@@ -124,32 +131,52 @@ export function createGeminiAdapter(t: Translator, signal?: AbortSignal): Platfo
         }
         clickLikeUser(item, signal);
         await waitFor(() => !!imageMode(), 3000, 100, "Image mode not selected", signal);
+        console.log("[Omni:Content] Gemini image mode successfully selected");
         return "ok";
       } catch (error) {
         assertNotAborted(signal);
+        console.warn("[Omni:Content] Failed to ensure Gemini image mode:", error);
         pressEscape(signal);
         return "not-found";
       }
     },
     async ensureAspectRatio(ratio: AspectRatio) {
       assertNotAborted(signal);
-      const getButton = () => firstVisible<HTMLElement>(SELECTORS.ratio);
+      const getButton = () => {
+        const byAria = firstVisible<HTMLElement>(SELECTORS.ratio);
+        if (byAria) return byAria;
+        const allButtons = Array.from(document.querySelectorAll<HTMLElement>("button"));
+        return allButtons.find(b => isVisible(b) && (/aspect\s*ratio/i.test(b.innerText || "") || (b.innerText || "").includes("宽高比"))) || null;
+      };
       const selectedRatio = () => {
-        const label = getButton()?.getAttribute("aria-label") || "";
-        const match = label.match(/\b(1:1|3:4|4:3|9:16|16:9)\b/);
+        const btn = getButton();
+        const text = `${btn?.getAttribute("aria-label") || ""} ${btn?.innerText || ""}`;
+        const match = text.match(/\b(1:1|3:4|4:3|9:16|16:9)\b/);
         return match ? match[1] : undefined;
       };
-      if (!getButton()) return "not-found";
+      const btn = getButton();
+      if (!btn) {
+        console.warn("[Omni:Content] Gemini aspect ratio button not found in DOM");
+        return "not-found";
+      }
       if (selectedRatio() === ratio) return "ok";
       try {
-        clickLikeUser(getButton()!, signal);
-        const getOption = () => firstVisible<HTMLElement>([`[role="menuitemradio"][aria-label="${ratio}"]`, `[role="menuitemradio"][aria-label*="${ratio}"]`]);
+        clickLikeUser(btn, signal);
+        const getOption = () => {
+          const byAria = firstVisible<HTMLElement>([`[role="menuitemradio"][aria-label="${ratio}"]`, `[role="menuitemradio"][aria-label*="${ratio}"]`]);
+          if (byAria) return byAria;
+          const allRadios = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'));
+          return allRadios.find(r => isVisible(r) && normalizeText(r.innerText) === ratio) || null;
+        };
         await waitFor(() => !!getOption(), 2000, 100, "Aspect ratio option not found", signal);
-        clickLikeUser(getOption()!, signal);
-        await waitFor(() => selectedRatio() === ratio, 2000, 100, "Aspect ratio not selected", signal);
+        const option = getOption()!;
+        clickLikeUser(option, signal);
+        await waitFor(() => selectedRatio() === ratio || option.getAttribute("aria-checked") === "true", 2000, 100, "Aspect ratio not selected", signal);
+        console.log(`[Omni:Content] Gemini aspect ratio set to ${ratio}`);
         return "ok";
       } catch (error) {
         assertNotAborted(signal);
+        console.warn("[Omni:Content] Failed to set aspect ratio:", error);
         pressEscape(signal);
         return "not-found";
       }

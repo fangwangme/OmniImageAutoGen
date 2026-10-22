@@ -21,6 +21,7 @@ export async function openSession(store: PanelStore, run: RunState, current: () 
   run.stages["open-session"] = { status: "active", startedAt };
   store.render();
   const targetUrl = run.sessionPending ? run.homeUrl : run.sessionUrl;
+  store.addLog("info", `[Session] 正在打开 ${run.platform} 会话 (目标: ${targetUrl})`);
   let existing: chrome.tabs.Tab | undefined;
   if (reuse && !run.sessionPending) {
     const tabs = await chrome.tabs.query({ currentWindow: true });
@@ -31,8 +32,10 @@ export async function openSession(store: PanelStore, run: RunState, current: () 
   check();
   if (tab.id === undefined) throw taskError(createTranslator(store.state.language)("lifecycle.tabCreationFailed"), "locked-url");
   run.currentTabId = tab.id;
-  await waitForPageLoad(tab.id, secondsSetting(settings.settings_pageLoadTimeout, 30) * 1000, chrome.tabs.get.bind(chrome.tabs), current);
+  store.addLog("info", `[Session] 已创建/激活标签页 (Tab ${tab.id})，等待页面导航加载...`);
+  await waitForPageLoad(tab.id, secondsSetting(settings.settings_pageLoadTimeout, 30) * 1000, chrome.tabs.get.bind(chrome.tabs), current, run.platform);
   check();
+  store.addLog("info", `[Session] 页面导航已就绪 (Tab ${tab.id})`);
   await new Promise(resolve => setTimeout(resolve, stepDelaySeconds(settings.settings_stepDelay) * 2000));
   check();
   if (!run.sessionPending) {
