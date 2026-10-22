@@ -219,6 +219,7 @@ Every request includes its action. Task-originated reports/requests include `tas
 | `TASK_STAGE` | Content/background → panel | stage, status, meta?, taskIndex, taskRunSeq | none |
 | `LOG` | Content → background | level, message, data?, source, event?, verbose?, scope | ok:true |
 | `PANEL_LOG` | Background → panel | same log fields plus timestamp | none |
+| `CONTENT_READY` | Content → panel | url, readyState, scope | none |
 | `OPEN_OPTIONS` | Panel → background | none | Opens Options |
 | `RESET_STATE` | Panel/Options → background | none | Cancels arm and resets hash |
 | `RELOAD_WARNING_PATTERNS` | Panel → platform tabs | none | Reloads custom rules |
@@ -299,11 +300,19 @@ Start opens/reuses the selected session, filters existing files and stays in set
 | Retries exhausted, within failure cap | Mark failed and advance to next task |
 | Retries exhausted, consecutive failure cap reached | Halt run (`fail-stop`) |
 
-### Watchdog budget
+### Watchdog budget and injection handshake
 
 - Full attempt: `generationTimeout + downloadTimeout + 15s`.
 - Download-only attempt: `downloadTimeout + 15s`.
 - Watchdog expiry marks task failure and advances without normal retry.
+- When injecting `content.js`, the side panel expects a `CONTENT_READY` handshake. If no handshake is received within 8 seconds, the panel logs a diagnostic warning containing the tab's current URL, loading state, and target platform to detect early navigation drops or login barriers before the watchdog timeout fires.
+- `waitForPageLoad` validates that the tab has navigated to a supported platform origin (not a transient blank page) and reached `complete` status.
+
+### Folder re-authorization and navigation
+
+- When directory permission state is `prompt`, the UI offers in-place re-authorization calling `handle.requestPermission({mode:"readwrite"})` directly, without forcing the user through `showDirectoryPicker`.
+- "Back to setup" in the finished view is rendered as a secondary button with visible border and background.
+- Log outputs in the side panel render runtime step events without verbose suppression so the user can follow live execution progress.
 
 ### Stop, Reset, and Finish
 
