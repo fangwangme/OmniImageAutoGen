@@ -11,8 +11,13 @@ const BUILTIN_TEXT_WARNING_PATTERNS: RegExp[] = [
   /\b(violates?|violation)\b.*\b(content|safety)\b.*\b(policy|guidelines?)\b/i,
   /\b(content|safety)\s+(policy|filter|filters)\b/i,
   /\b(request|response)\s+(was )?(blocked|rejected)\b/i,
+  /\b(hard\s+time\s+fulfilling\s+your\s+request)\b/i,
+  /\b(having\s+(a\s+)?(trouble|hard\s+time))\b/i,
+  /\b(check\s+your\s+internet\s+connection)\b/i,
+  /\b(something\s+went\s+wrong|try\s+again\s+later)\b/i,
   /无法(?:生成|处理|提供)/,
   /不能(?:生成|处理|提供)/,
+  /抱歉.*(?:无法|不能)/,
   /违反(?:了)?(?:我们的)?(?:内容|安全)?政策/,
   /内容(?:审核|安全)/,
   /请求(?:被)?(?:拒绝|拦截)/

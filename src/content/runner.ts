@@ -187,15 +187,17 @@ export async function runTask(context: TaskStorageContext, adapter: PlatformAdap
       stage("image-mode", "active");
       logInfo("[Step 2/5: 生图模式] 正在检查/触发生图模式...");
       const imageMode = await adapter.ensureImageMode(timing.step);
-      const ratio = adapter.ensureAspectRatio ? await adapter.ensureAspectRatio(context.settings_aspectRatio || "16:9", timing.step) : "ok";
-      const modeReady = imageMode === "ok" && ratio === "ok";
-      stage("image-mode", "done", modeReady ? "ok" : "skipped");
-      if (modeReady) {
-        logInfo(`[Step 2/5: 生图模式] 生图模式就绪 (比例: ${context.settings_aspectRatio || "默认"})`);
-      } else {
-        logEvent("warn", t("content.event.imageModeMissing"));
-        logWarn(`[Step 2/5: 生图模式] 生图模式切换结果: mode=${imageMode}, ratio=${ratio}，继续执行`);
+      if (imageMode !== "ok") {
+        logError(`[Step 2/5: 生图模式] 未能激活生图模式 (${imageMode})，终止执行避免文本误发送`);
+        throw new TaskError(t("content.error.imageModeFailed", { mode: imageMode }), "generation");
       }
+      const ratio = adapter.ensureAspectRatio ? await adapter.ensureAspectRatio(context.settings_aspectRatio || "16:9", timing.step) : "ok";
+      if (ratio === "ok") {
+        logInfo(`[Step 2/5: 生图模式] 生图模式已就绪 (比例: ${context.settings_aspectRatio || "默认"})`);
+      } else {
+        logWarn(`[Step 2/5: 宽高比] 比例设置未成功 (${ratio})，将以当前默认比例继续`);
+      }
+      stage("image-mode", "done", ratio === "ok" ? "ok" : "skipped");
       stage("send-prompt", "active");
       const sendStart = Date.now();
       const baseline = adapter.snapshotUserMessages();
