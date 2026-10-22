@@ -16,13 +16,19 @@ export type TaskLifecycleState = RunState;
 export function createTaskLifecycle(store: PanelStore) {
   let epoch = 0, lastSequence = Date.now(), handlingSequence: number | null = null;
   let watchdog: ReturnType<typeof setTimeout> | undefined;
+  let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   let ticker: ReturnType<typeof setInterval> | undefined;
   let storageChain: Promise<void> = Promise.resolve();
   let disposed = false, resetting = false;
   const t = (key: string, vars?: Record<string, string | number>) => createTranslator(store.state.language)(key, vars);
   const currentRun = (run: RunState) => !disposed && store.state.run === run && run.isRunning;
   const currentTask = (run: RunState, sequence: number, index = run.currentIndex) => currentRun(run) && sequence === run.activeTaskRunSeq && index === run.currentIndex;
-  const clearWatchdog = () => { if (watchdog !== undefined) clearTimeout(watchdog); watchdog = undefined; };
+  const clearWatchdog = () => {
+    if (watchdog !== undefined) clearTimeout(watchdog);
+    watchdog = undefined;
+    if (handshakeTimer !== undefined) clearTimeout(handshakeTimer);
+    handshakeTimer = undefined;
+  };
   const clearTicker = () => { if (ticker !== undefined) clearInterval(ticker); ticker = undefined; };
   const nextSequence = (run: RunState) => { lastSequence = Math.max(Date.now(), lastSequence + 1, run.activeTaskRunSeq + 1); run.activeTaskRunSeq = lastSequence; return lastSequence; };
   const persist = (items: Record<string, unknown>, current: () => boolean): Promise<void> => {
@@ -178,7 +184,21 @@ export function createTaskLifecycle(store: PanelStore) {
         void handleTaskError(run, sequence, `Task watchdog timeout after ${Math.round(timeoutMs / 1000)}s`, run.currentTaskMode === "download-only" ? "download" : "generation");
       }, timeoutMs);
       if (run.currentTabId === null) throw taskError(t("lifecycle.noTab"), "locked-url");
-      await chrome.scripting.executeScript({ target: { tabId: run.currentTabId }, func: async (cacheBust: number) => { await import(`${chrome.runtime.getURL("content.js")}?v=${cacheBust}&taskRunSeq=${cacheBust}`); }, args: [sequence] });
+      const targetTabId = run.currentTabId;
+      handshakeTimer = setTimeout(async () => {
+        if (!guard() || handlingSequence === sequence) return;
+        try {
+          const tab = await chrome.tabs.get(targetTabId);
+          console.warn(`[Omni:Sidepanel] Content script handshake pending after 8s (Tab ${tab.id} status: ${tab.status}, URL: ${tab.url})`);
+          store.addLog("warn", `[Diagnostic] Content script handshake pending after 8s (Tab ${tab.id} status: ${tab.status}, URL: ${tab.url || "unknown"})`);
+        } catch {
+          console.warn(`[Omni:Sidepanel] Content script handshake pending after 8s for Tab ${targetTabId}`);
+          store.addLog("warn", `[Diagnostic] Content script handshake pending after 8s (Tab ${targetTabId})`);
+        }
+      }, 8000);
+      store.addLog("info", `[Tab ${targetTabId}] 正在注入执行脚本...`);
+      console.log(`[Omni:Sidepanel] Injecting content script into Tab ${targetTabId} for task #${index + 1} (seq: ${sequence})`);
+      await chrome.scripting.executeScript({ target: { tabId: targetTabId }, func: async (cacheBust: number) => { await import(`${chrome.runtime.getURL("content.js")}?v=${cacheBust}&taskRunSeq=${cacheBust}`); }, args: [sequence] });
       if (!guard()) return;
     } catch (error) {
       if (!guard() || handlingSequence === sequence) return;
@@ -236,6 +256,15 @@ export function createTaskLifecycle(store: PanelStore) {
     }
     if (!currentRun(run) || request.taskRunSeq !== run.activeTaskRunSeq || request.taskIndex !== run.currentIndex) return;
     const sequence = run.activeTaskRunSeq;
+    if (request.action === "CONTENT_READY") {
+      if (handshakeTimer !== undefined) {
+        clearTimeout(handshakeTimer);
+        handshakeTimer = undefined;
+      }
+      console.log(`[Omni:Sidepanel] Content script ready on Tab ${run.currentTabId}:`, request.url);
+      store.addLog("info", `[Content] 页面脚本已接管 (URL: ${request.url || "unknown"})`);
+      return;
+    }
     if (request.action === "TASK_STAGE") {
       if (handlingSequence === sequence || !run.stages[request.stage]) return;
       const now = Date.now(), stage = run.stages[request.stage];

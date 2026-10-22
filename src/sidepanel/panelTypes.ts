@@ -7,6 +7,7 @@ export type PanelMessage = Scope & (
   | { action: "TASK_ERROR"; error: string; errorType?: TaskErrorType }
   | { action: "TASK_STAGE"; stage: StageId; status: StageStatus; meta?: string }
   | { action: "UPDATE_STATUS"; status: string; isError?: boolean }
+  | { action: "CONTENT_READY"; url?: string; readyState?: string }
   | { action: "PANEL_LOG"; level: "info" | "ok" | "log" | "warn" | "error"; message: string; data?: unknown; source?: string; timestamp?: string; event?: boolean; verbose?: boolean }
 );
 export type ListFilesResponse = { files?: string[]; error?: string; errorType?: TaskErrorType };

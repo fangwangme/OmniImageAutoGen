@@ -137,7 +137,17 @@ export async function runTask(context: TaskStorageContext, adapter: PlatformAdap
       throw new TaskError(t("content.error.lockedUrlMismatch", { expected: pending ? context.currentHomeUrl || "" : sessionUrl, actual: window.location.href }), "locked-url");
     };
     assertSessionUrl("task-start");
-    await waitFor(() => adapter.isPageReady().ready, timing.input, timing.poll, t("content.error.timeoutInputField"), signal);
+    const initialReady = adapter.isPageReady();
+    if (!initialReady.ready) {
+      logInfo("[Content] 等待页面及输入框就绪...", initialReady.details);
+    }
+    try {
+      await waitFor(() => adapter.isPageReady().ready, timing.input, timing.poll, t("content.error.timeoutInputField"), signal);
+    } catch (err) {
+      const finalReady = adapter.isPageReady();
+      logError("[Content] 页面或输入框未就绪", finalReady.details);
+      throw err;
+    }
     let userMessage: Element;
     if (mode === "download-only") {
       if (pending) throw new TaskError(t("content.error.existingResponseNotFound"), "generation");

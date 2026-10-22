@@ -44,6 +44,7 @@ export type ContentMessage = TaskScopeIds & (
   | { action: "TASK_COMPLETE"; skipped: boolean; skipReason?: "exists" | "warning"; warningExcerpt?: string }
   | { action: "TASK_ERROR"; error: string; errorType?: TaskErrorType }
   | { action: "UPDATE_STATUS"; status: string; isError?: boolean }
+  | { action: "CONTENT_READY"; url?: string; readyState?: string }
   | { action: "LOG"; level: "log" | "info" | "ok" | "warn" | "error"; message: string; data?: unknown; source?: string; event?: boolean; verbose?: boolean }
 );
 
@@ -57,6 +58,9 @@ export class TaskError extends Error {
 
 export function createContentLogger(sendMessage: typeof runtimeSendMessage) {
   const log = (level: "log" | "info" | "warn" | "error", message: string, data: unknown, event: boolean) => {
+    if (level === "error") console.error(`[Omni:Content] ${message}`, data ?? "");
+    else if (level === "warn") console.warn(`[Omni:Content] ${message}`, data ?? "");
+    else console.log(`[Omni:Content] ${message}`, data ?? "");
     void sendMessage<void>({ action: "LOG", level, message, data, source: "content", event, verbose: !event }).catch(() => undefined);
   };
   return {

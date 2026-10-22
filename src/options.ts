@@ -46,9 +46,10 @@ function setSaveStatus(error=false) {
   if(!error){void element.offsetWidth;element.classList.add('saved');}
 }
 function renderFolder(folder:'source'|'output') {
-  const status=folders[folder],isGranted=status.state==='granted',missing=status.state==='missing';
+  const status=folders[folder],isGranted=status.state==='granted',missing=status.state==='missing',isPrompt=status.state==='prompt';
   const name=status.name || t('op.notSet'),example=toSafeTaskFilename(exampleTask?.name || '0000_000.png');
-  return `<div class="setting-row"><div class="setting-description folder-description"><span class="setting-label">${e(t('op.'+folder))}</span><span class="setting-help">${e(t('op.'+folder+'Help'))}</span><span class="folder-summary"><span class="folder-name">${e(name)}</span><span class="access-badge ${isGranted?'granted':missing?'':'needed'}">${e(t(isGranted?'op.accessGranted':missing?'op.notSet':'op.accessNeeded'))}</span></span>${folder==='output'?`<div class="folder-tree"><span>${e(status.name || 'Output')}/</span><span>├─ chatgpt/${e(example)}</span><span>└─ gemini/${e(example)}</span></div>`:''}</div><button type="button" class="control-button" data-action="folder" data-value="${folder}">${e(t('op.change'))}</button></div>`;
+  const allowBtn=isPrompt?`<button type="button" class="control-button primary" data-action="reauth-folder" data-value="${folder}">${e(t('op.allowAgain'))}</button>`:'';
+  return `<div class="setting-row"><div class="setting-description folder-description"><span class="setting-label">${e(t('op.'+folder))}</span><span class="setting-help">${e(t('op.'+folder+'Help'))}</span><span class="folder-summary"><span class="folder-name">${e(name)}</span><span class="access-badge ${isGranted?'granted':missing?'':'needed'}">${e(t(isGranted?'op.accessGranted':missing?'op.notSet':'op.accessNeeded'))}</span></span>${folder==='output'?`<div class="folder-tree"><span>${e(status.name || 'Output')}/</span><span>├─ chatgpt/${e(example)}</span><span>└─ gemini/${e(example)}</span></div>`:''}</div><div class="folder-actions">${allowBtn}<button type="button" class="control-button" data-action="folder" data-value="${folder}">${e(t('op.change'))}</button></div></div>`;
 }
 function renderTiming() {
   return timingKeys.map(key=>`<div class="setting-row timing-row"><div class="setting-description"><label for="${key}">${e(t('op.'+key))}</label><span class="setting-help">${e(t('op.'+key+'Help'))}</span></div><div class="timing-control"><input id="${key}" class="timing-input" type="number" min="${key==='maxRetries'||key==='maxConsecutiveFailures'?'0':'0.001'}" step="${key==='maxRetries'||key==='maxConsecutiveFailures'?'1':'any'}" data-timing="${key}" value="${e(timingDrafts[key])}" aria-invalid="${!validTiming(key)}"><span class="timing-unit">${e(t(key==='maxRetries'?'op.times':key==='maxConsecutiveFailures'?'op.images':'op.sec'))}</span></div></div>`).join('');
@@ -118,6 +119,20 @@ async function handleAction(button:HTMLElement) {
   if(resetting)return;
   const value=button.dataset.value;
   switch(button.dataset.action){
+    case 'reauth-folder': {
+      if(preview)return;
+      const folder=value as 'source'|'output';
+      try {
+        const handle=await getHandle<FileSystemDirectoryHandle>(folder+'Handle');
+        if(handle?.requestPermission) {
+          const res = await handle.requestPermission({mode:'readwrite'});
+          if(res==='granted') {
+            await readFolders();render();setSaveStatus();
+          }
+        }
+      }catch(error){if(!(error instanceof DOMException&&error.name==='AbortError'))throw error;}
+      break;
+    }
     case 'folder': {
       if(preview)return;
       const folder=value as 'source'|'output';

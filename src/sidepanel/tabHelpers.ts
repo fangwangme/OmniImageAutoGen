@@ -1,15 +1,28 @@
 import { shouldCreatePlaceholder as shouldCreatePlaceholderByCount } from "../utils/placeholderPolicy.js";
 import { sessionUrlsMatch } from "../utils/platforms.js";
+import { isTabNavigationComplete } from "../utils/tabNavigationGuard.js";
+import type { PlatformId } from "../types.js";
 
 type TabsGet = (tabId: number) => Promise<chrome.tabs.Tab>;
 type TabsCreate = (props: chrome.tabs.CreateProperties) => Promise<chrome.tabs.Tab>;
 type TabsRemove = (tabId: number) => Promise<void>;
 type TabsQuery = (queryInfo: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>;
 export const shouldCreatePlaceholder = shouldCreatePlaceholderByCount;
-export async function waitForPageLoad(tabId: number, timeoutMs: number, tabsGet: TabsGet = chrome.tabs.get.bind(chrome.tabs), current: () => boolean = () => true) {
+export async function waitForPageLoad(
+  tabId: number,
+  timeoutMs: number,
+  tabsGet: TabsGet = chrome.tabs.get.bind(chrome.tabs),
+  current: () => boolean = () => true,
+  platform?: PlatformId
+) {
+  const isComplete = (tab?: chrome.tabs.Tab) => {
+    if (!tab) return false;
+    if (platform) return isTabNavigationComplete(tab.url, platform, tab.status);
+    return tab.status === "complete" && tab.url !== "about:blank" && Boolean(tab.url);
+  };
   const immediate = await tabsGet(tabId);
   if (!current()) throw new Error("Cancelled");
-  if (immediate.status === "complete") return;
+  if (isComplete(immediate)) return;
   return new Promise<void>((resolve, reject) => {
     let finished = false;
     let checking = false;
@@ -20,15 +33,26 @@ export async function waitForPageLoad(tabId: number, timeoutMs: number, tabsGet:
       clearInterval(interval); clearTimeout(timer);
       if (error) reject(error); else resolve();
     };
-    const listener = (id: number, change: chrome.tabs.TabChangeInfo) => {
+    const listener = async (id: number, change: chrome.tabs.TabChangeInfo) => {
       if (!current()) return done(new Error("Cancelled"));
-      if (id === tabId && change.status === "complete") done();
+      if (id === tabId) {
+        try {
+          const tab = await tabsGet(tabId);
+          if (isComplete(tab)) done();
+        } catch {
+          if (change.status === "complete") done();
+        }
+      }
     };
     const interval = setInterval(async () => {
       if (!current()) return done(new Error("Cancelled"));
       if (checking) return;
       checking = true;
-      try { const tab = await tabsGet(tabId); if (!current()) done(new Error("Cancelled")); else if (tab.status === "complete") done(); }
+      try {
+        const tab = await tabsGet(tabId);
+        if (!current()) done(new Error("Cancelled"));
+        else if (isComplete(tab)) done();
+      }
       catch (error) { done(error instanceof Error ? error : new Error(String(error))); }
       finally { checking = false; }
     }, 250);
