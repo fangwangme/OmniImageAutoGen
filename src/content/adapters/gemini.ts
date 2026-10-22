@@ -106,14 +106,21 @@ export function createGeminiAdapter(t: Translator, signal?: AbortSignal): Platfo
     scrollToBottom: stepDelayMs => scrollPageToBottom(stepDelayMs, signal),
     async ensureImageMode(stepDelayMs) {
       assertNotAborted(signal);
-      if (imageMode()) return "ok";
+      if (imageMode()) {
+        console.log("[Omni:Content] Gemini already in image mode");
+        return "ok";
+      }
       if (imageItem()?.getAttribute("aria-checked") === "true") {
         pressEscape(signal);
+        console.log("[Omni:Content] Gemini image mode item already checked");
         return "ok";
       }
       try {
         const tools = firstVisible<HTMLElement>(SELECTORS.tools);
-        if (!tools) return "not-found";
+        if (!tools) {
+          console.warn("[Omni:Content] Gemini tools button not found");
+          return "not-found";
+        }
         clickLikeUser(tools, signal);
         await waitFor(() => !!imageItem(), Math.max(2000, stepDelayMs * 3), 100, "Image mode menu not found", signal);
         const item = imageItem();
@@ -124,9 +131,11 @@ export function createGeminiAdapter(t: Translator, signal?: AbortSignal): Platfo
         }
         clickLikeUser(item, signal);
         await waitFor(() => !!imageMode(), 3000, 100, "Image mode not selected", signal);
+        console.log("[Omni:Content] Gemini image mode successfully selected");
         return "ok";
       } catch (error) {
         assertNotAborted(signal);
+        console.warn("[Omni:Content] Failed to ensure Gemini image mode:", error);
         pressEscape(signal);
         return "not-found";
       }

@@ -57,16 +57,21 @@ async function sendAndConfirm(adapter: PlatformAdapter, baseline: Element[], anc
   throw new Error(t("content.error.sendNotConfirmed"));
 }
 
-async function waitGeneration(adapter: PlatformAdapter, userMessage: Element, timing: Timing, t: Translator, signal: AbortSignal): Promise<{ kind: "image" } | { kind: "warning"; excerpt: string }> {
+async function waitGeneration(adapter: PlatformAdapter, userMessage: Element, timing: Timing, t: Translator, signal: AbortSignal, logInfo?: (message: string, data?: unknown) => void): Promise<{ kind: "image" } | { kind: "warning"; excerpt: string }> {
   const start = Date.now();
   const deadline = start + timing.generation;
   const noProgressLimit = Math.min(timing.generation, Math.max(timing.stability, 15000));
   let noProgressSince = start;
   let textOnlySince: number | null = null;
+  let lastHeartbeat = start;
   while (Date.now() < deadline) {
     assertNotAborted(signal);
     const state = adapter.readReplyState(userMessage);
     const now = Date.now();
+    if (logInfo && now - lastHeartbeat >= 10000) {
+      lastHeartbeat = now;
+      logInfo(`[Step 4/5: 生成中] 已等待 ${Math.round((now - start) / 1000)}s`, { busy: state.busy, complete: state.complete, hasImage: state.hasAnyImageNode });
+    }
     if (!state.busy && state.complete && !state.hasAnyImageNode && !state.downloadReady) {
       const text = adapter.replyText(userMessage);
       if (matchesWarningPattern(text)) return { kind: "warning", excerpt: text.slice(0, 120) };
@@ -107,7 +112,7 @@ export async function runTask(context: TaskStorageContext, adapter: PlatformAdap
     assertNotAborted(signal);
     return runtimeSendMessage<T>({ ...message, taskIndex: context.currentTaskIndex, taskRunSeq: context.currentTaskRunSeq });
   };
-  const { logInfo, logError, logEvent } = createContentLogger(sendMessage);
+  const { logInfo, logWarn, logError, logEvent } = createContentLogger(sendMessage);
   const stage = (id: StageId, status: StageStatus, meta?: string) => void sendMessage<void>({ action: "TASK_STAGE", stage: id, status, meta }).catch(() => undefined);
   const status = (text: string, isError = false) => void sendMessage<void>({ action: "UPDATE_STATUS", status: text, isError }).catch(() => undefined);
   const complete = (skipped: boolean, skipReason?: "exists" | "warning", warningExcerpt?: string) => sendMessage<void>({ action: "TASK_COMPLETE", skipped, skipReason, warningExcerpt });
@@ -139,13 +144,14 @@ export async function runTask(context: TaskStorageContext, adapter: PlatformAdap
     assertSessionUrl("task-start");
     const initialReady = adapter.isPageReady();
     if (!initialReady.ready) {
-      logInfo("[Content] 等待页面及输入框就绪...", initialReady.details);
+      logInfo("[Step 1/5: 页面就绪] 等待页面及输入框就绪...", initialReady.details);
     }
     try {
       await waitFor(() => adapter.isPageReady().ready, timing.input, timing.poll, t("content.error.timeoutInputField"), signal);
+      logInfo("[Step 1/5: 页面就绪] 页面与输入框已确认就绪");
     } catch (err) {
       const finalReady = adapter.isPageReady();
-      logError("[Content] 页面或输入框未就绪", finalReady.details);
+      logError("[Step 1/5: 页面就绪] 页面或输入框超时未就绪", finalReady.details);
       throw err;
     }
     let userMessage: Element;
@@ -153,6 +159,7 @@ export async function runTask(context: TaskStorageContext, adapter: PlatformAdap
       if (pending) throw new TaskError(t("content.error.existingResponseNotFound"), "generation");
       stage("image-mode", "reused");
       stage("send-prompt", "reused");
+      logInfo(`[DownloadOnly] 正在通过锚点查找既有回复 (${anchor})...`);
       const found = adapter.findReplyByAnchor(anchor);
       if (!found) throw new TaskError(t("content.error.existingResponseNotFound"), "generation");
       userMessage = found.userMessage;
@@ -168,53 +175,71 @@ export async function runTask(context: TaskStorageContext, adapter: PlatformAdap
       }
       stage("generate", "reused");
     } else {
-      if (!pending) await adapter.waitHistorySettled(timing.stability * 2, timing.step);
+      if (!pending) {
+        logInfo("[History] 正在等待上一轮历史对话稳定...");
+        await adapter.waitHistorySettled(timing.stability * 2, timing.step);
+        logInfo("[History] 历史对话已稳定");
+      }
       await wait(timing.step * 3, signal);
       await adapter.scrollToBottom(timing.step);
       await wait(timing.step, signal);
       assertSessionUrl("before-type");
       stage("image-mode", "active");
+      logInfo("[Step 2/5: 生图模式] 正在检查/触发生图模式...");
       const imageMode = await adapter.ensureImageMode(timing.step);
       const ratio = adapter.ensureAspectRatio ? await adapter.ensureAspectRatio(context.settings_aspectRatio || "16:9", timing.step) : "ok";
       const modeReady = imageMode === "ok" && ratio === "ok";
       stage("image-mode", "done", modeReady ? "ok" : "skipped");
-      if (!modeReady) logEvent("warn", t("content.event.imageModeMissing"));
+      if (modeReady) {
+        logInfo(`[Step 2/5: 生图模式] 生图模式就绪 (比例: ${context.settings_aspectRatio || "默认"})`);
+      } else {
+        logEvent("warn", t("content.event.imageModeMissing"));
+        logWarn(`[Step 2/5: 生图模式] 生图模式切换结果: mode=${imageMode}, ratio=${ratio}，继续执行`);
+      }
       stage("send-prompt", "active");
       const sendStart = Date.now();
       const baseline = adapter.snapshotUserMessages();
+      logInfo(`[Step 3/5: 输入发送] 正在填入提示词 (任务: ${task.name})...`);
       if (!await adapter.writePrompt(composeTaskPrompt(filename, task.prompt), timing.step)) throw new Error(t("content.error.failedToWritePrompt"));
+      logInfo("[Step 3/5: 输入发送] 提示词写入成功，准备点击发送...");
       assertSessionUrl("before-send");
       userMessage = await sendAndConfirm(adapter, baseline, anchor, timing, t, signal, logInfo);
       stage("send-prompt", "done", `${Math.round((Date.now() - sendStart) / 1000)}s`);
       logEvent("info", t("content.event.promptSent"));
+      logInfo("[Step 3/5: 输入发送] 发送成功，用户消息已在聊天界面确认");
       stage("generate", "active");
       status(t("content.status.generating"));
       const generationStart = Date.now();
+      logInfo(`[Step 4/5: 等待生成] 正在等待图片生成 (最长等待 ${Math.round(timing.generation / 1000)}s)...`);
       let generated;
       try {
-        generated = await waitGeneration(adapter, userMessage, timing, t, signal);
+        generated = await waitGeneration(adapter, userMessage, timing, t, signal, logInfo);
       } catch (error) {
         assertNotAborted(signal);
         adapter.getStopButton()?.click();
         throw error;
       }
       if (generated.kind === "warning") {
+        logWarn(`[Step 4/5: 等待生成] 触发安全/内容策略警告: ${generated.excerpt}`);
         await complete(true, "warning", generated.excerpt);
         return;
       }
       stage("generate", "done", `${Math.round((Date.now() - generationStart) / 1000)}s`);
       logEvent("info", t("content.event.imageReady"));
+      logInfo(`[Step 4/5: 等待生成] 图片生成完毕 (耗时 ${Math.round((Date.now() - generationStart) / 1000)}s)`);
       await wait(timing.step * 2, signal);
     }
     await scope.assertCurrent();
     stage("download", "active");
     status(t("content.status.downloading"));
+    logInfo(`[Step 5/5: 下载保存] 准备捕获并保存图片: ${filename}...`);
     const arm = await sendMessage<DownloadArmResponse>({ action: "DOWNLOAD_ARM", platform: adapter.id, targetFilename: filename });
     if (!arm?.ok || !arm.armId) throw new TaskError(arm?.error || t("content.error.fileSaveFailed"), arm?.errorType || "download");
     currentPhase = "download";
     assertNotAborted(signal);
     await adapter.triggerDownload(userMessage, timing.step);
     logEvent("info", t(mode === "download-only" ? "content.event.downloadRetryClicked" : "content.event.downloadClicked"));
+    logInfo(`[Step 5/5: 下载保存] 下载按钮已触发，等待文件写入本地磁盘...`);
     status(t("content.status.waitingForFile"));
     let result: WaitAndSaveResponse;
     try {
@@ -224,6 +249,7 @@ export async function runTask(context: TaskStorageContext, adapter: PlatformAdap
     }
     if (!result?.success) throw new TaskError(result?.error || t("content.error.fileSaveFailed"), result?.errorType || "download");
     await scope.assertCurrent();
+    logInfo(`[Step 5/5: 下载保存] 文件保存成功: ${filename}`);
     status(t("content.status.complete", { name: task.name }));
     await complete(false);
   } catch (error) {
